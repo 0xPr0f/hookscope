@@ -414,13 +414,14 @@ export async function runParallelRevmExploration(input: {
   }
 }
 
-type ForkExecutionSessionInput = {
+export type ForkExecutionSessionInput = {
   scanId: string
   client: PublicClient
   stateBlockNumber: bigint
   snapshot?: ForkSnapshot
   onPhase?: (phase: 'loading-wasm' | 'loading-snapshot' | 'ready') => void
   readyTimeoutMs?: number
+  loadHydration?: (request: ForkHydrationRequest) => Promise<ForkHydrationUpdate>
 }
 
 type ForkExecutionInput = {
@@ -567,11 +568,13 @@ export class ForkExecutionSession {
   }
 
   private async load(request: ForkHydrationRequest) {
-    const update = await loadForkHydration({
-      client: this.input.client,
-      stateBlockNumber: this.input.stateBlockNumber,
-      request,
-    })
+    const update = this.input.loadHydration
+      ? await this.input.loadHydration(request)
+      : await loadForkHydration({
+          client: this.input.client,
+          stateBlockNumber: this.input.stateBlockNumber,
+          request,
+        })
     this.rpcReads += request.kind === 'account' ? 3 : 1
     this.record(update)
     return update
@@ -655,7 +658,7 @@ export class ForkExecutionSession {
   }
 }
 
-type ForkExplorationSessionInput = ForkExecutionSessionInput
+export type ForkExplorationSessionInput = ForkExecutionSessionInput
 
 type ActiveExplorationWarmup = {
   runId: string
@@ -816,7 +819,9 @@ export class ForkExplorationSession {
   }
 
   private async load(request: ForkHydrationRequest) {
-    const update = await loadForkHydration({ client: this.input.client, stateBlockNumber: this.input.stateBlockNumber, request })
+    const update = this.input.loadHydration
+      ? await this.input.loadHydration(request)
+      : await loadForkHydration({ client: this.input.client, stateBlockNumber: this.input.stateBlockNumber, request })
     this.rpcReads += request.kind === 'account' ? 3 : 1
     if (update.kind === 'account') this.hydratedAccounts++
     if (update.kind === 'storage') this.hydratedStorageSlots++
