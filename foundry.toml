@@ -1,0 +1,23 @@
+[profile.default]
+src = "contracts"
+test = "test"
+out = "out"
+libs = ["node_modules"]
+solc = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 20000
+via_ir = true
+bytecode_hash = "none"
+gas_limit = "300000000"
+fs_permissions = [{ access = "read-write", path = "./src/fixtures/generated" }]
+remappings = [
+  "@uniswap/v4-core/=node_modules/@uniswap/v4-core/",
+  "@uniswap/v4-periphery/=node_modules/@uniswap/v4-periphery/",
+  "forge-std/=node_modules/@uniswap/v4-core/lib/forge-std/src/",
+  "solmate/=node_modules/@uniswap/v4-core/lib/solmate/"
+]
+
+[profile.default.fuzz]
+runs = 256
+seed = "0x484f4f4b53434f5045"

@@ -1,0 +1,28 @@
+[package]
+name = "hookscope-revm-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+libafl-fuzz = ["dep:libafl", "dep:libafl_bolts", "dep:web-sys"]
+
+[dependencies]
+hex = "0.4.3"
+libafl = { version = "=0.15.4", default-features = false, optional = true }
+libafl_bolts = { version = "=0.15.4", default-features = false, optional = true }
+revm = { version = "36.0.0", default-features = false, features = ["std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "=0.2.105"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Transitive curve/precompile code uses rand_core even though this wrapper does
+# not generate randomness. getrandom's JS backend makes that graph portable.
+getrandom = { version = "0.2.17", features = ["js"] }
+web-sys = { version = "0.3.81", features = ["Performance", "Window"], optional = true }

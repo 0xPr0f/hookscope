@@ -1,0 +1,10 @@
+node_modules/
+dist/
+crates/revm-wasm/target/
+.DS_Store
+.env
+.env.*
+!.env.example
+.vercel/
+playwright-report/
+test-results/
