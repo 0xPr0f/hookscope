@@ -218,5 +218,36 @@ describe('public Hacken scenario adaptation', () => {
     expect(evidence.claim).toContain('fixture-specific cases were classified but excluded')
     expect(evidence.claim).toContain('assertions over shared execution evidence')
     expect(evidence.technical?.passed).toBeGreaterThan(0)
+    expect(evidence.technical?.executionSources).toEqual([
+      'protocol-native-generated',
+      'hook-runtime-probe',
+    ])
+  })
+
+  it('counts only runtime calls that returned execution evidence', () => {
+    const evidence = publicHackenSuiteEvidence({
+      poolManager: POOL_MANAGER,
+      pools: [pool],
+      outcomes: [],
+      runtimeProbes: [
+        {
+          caseId: 'permissions-match-address',
+          poolId: pool.poolId,
+          hook: pool.hook,
+          status: 'passed',
+          reason: 'canonical response',
+          scenarioIds: ['runtime:getHookPermissions'],
+        },
+        {
+          caseId: 'base-hook-pool-manager',
+          poolId: pool.poolId,
+          hook: pool.hook,
+          status: 'error',
+          reason: 'shared deadline exhausted before execution',
+        },
+      ],
+    })
+    expect(evidence.technical?.runtimeExecutionCount).toBe(1)
+    expect(evidence.technical?.executionCount).toBe(1)
   })
 })

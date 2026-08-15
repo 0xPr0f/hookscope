@@ -185,8 +185,7 @@ describe('Uniswap v4 index-first discovery', () => {
     )
 
     expect(result.completeHistory).toBe(true)
-    expect(ranges.some(([from, to]) => to - from + 1n === 50n)).toBe(true)
-    expect(ranges.filter(([from, to]) => to - from + 1n <= 50n).every(([from, to]) => to - from + 1n <= 50n)).toBe(true)
+    expect(ranges.map(([from, to]) => to - from + 1n)).toEqual([131n, 131n, 50n, 50n, 50n, 50n, 31n, 31n])
   })
 
   it('extracts an explicit provider log ceiling from nested RPC errors', () => {

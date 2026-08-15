@@ -32,10 +32,11 @@ import { decodeProtocolRevert, summarizeProtocolSwapMovement, unresolvedProtocol
 // 0.10.0: unresolved revert selectors are batch-resolved through Sourcify's
 // filtered 4byte database and remain explicitly labelled as collision-prone
 // candidates rather than target-ABI facts.
-// 0.11.0: the same hydrated fork session now runs canonical hook getter,
-// direct-callback authorization, ERC-165, and compatible secondary-PoolId
-// adaptations for the public Hacken catalogue.
-export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.11.0'
+// 0.12.0: public callback authorization is now a paired observation: the same
+// selector must first complete through the deployed PoolManager before a direct
+// rejection can count as bounded compatibility. Optional runtime probes also
+// share one per-pool time and hydration budget.
+export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.12.0'
 
 /** EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks. */
 const SCENARIO_GAS_LIMIT = 16_000_000n
@@ -675,8 +676,15 @@ export async function runProtocolScenarios(input: {
         session,
         context,
         pools: input.pools,
+        outcomes,
         signal: input.signal,
+        timeoutMs: input.timeoutMs ?? DEFAULT_SCENARIO_TIMEOUT_MS,
         maxHydrationRequests: input.maxHydrationRequests,
+        onProgress: (detail) => input.onProgress?.(
+          scenarios.length,
+          scenarios.length,
+          `${pool.poolId.slice(0, 10)} · runtime · ${detail}`,
+        ),
       }))
       executedPools++
     } finally {

@@ -46,7 +46,14 @@ function report(): AnalysisReport {
         expectedOutcome: 'revert',
       },
       reproducibility: 'replayed',
-      technical: { calls: [{ selector: '0x70a08231' }] },
+      technical: {
+        calls: [{ selector: '0x70a08231' }],
+        hookRuntime: [
+          { selector: toFunctionSelector('getHookPermissions()') },
+          { selector: toFunctionSelector('poolManager()') },
+          { selector: toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)') },
+        ],
+      },
     }],
     phases: [{ id: 'report', label: 'Normalize', status: 'completed', completed: 1, total: 1, detail: 'Saw 0x12345678' }],
     limitations: [],
@@ -62,6 +69,9 @@ describe('report-wide selector catalog', () => {
       '0xa9059cbb',
       '0x70a08231',
       '0x12345678',
+      toFunctionSelector('getHookPermissions()'),
+      toFunctionSelector('poolManager()'),
+      toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)'),
     ]))
   })
 
@@ -82,6 +92,13 @@ describe('report-wide selector catalog', () => {
       .toMatchObject({ name: 'owner()', source: 'verified-contract-abi', subjects: [SUBJECT] })
     expect(resolveSelectorSignature(result.lookup, '0xa9059cbb')?.candidate)
       .toMatchObject({ name: 'transfer(address,uint256)', source: 'canonical-interface' })
+    expect(resolveSelectorSignature(result.lookup, toFunctionSelector('getHookPermissions()'))?.candidate)
+      .toMatchObject({ name: 'getHookPermissions()', source: 'canonical-interface' })
+    expect(resolveSelectorSignature(result.lookup, toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)'))?.candidate)
+      .toMatchObject({
+        name: 'beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)',
+        source: 'canonical-interface',
+      })
     expect(resolveSelectorSignature(result.lookup, '0x007074c3')?.candidate)
       .toMatchObject({ name: 'LiquidityFrozen()', source: 'sourcify-4byte' })
     expect(fetchCandidates).toHaveBeenCalledWith(

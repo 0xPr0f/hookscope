@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   encodeAbiParameters,
   encodeEventTopics,
@@ -67,17 +67,27 @@ const context = {
   slot0: { sqrtPriceX96: 1n << 96n, tick: 0, protocolFee: 0, lpFee: 3_000 },
 } as unknown as ProtocolScenarioContext
 
-function call(target: Address, selector: Hex) {
+function call(target: Address, selector: Hex, caller: Address = ACTOR) {
   return {
     frameId: 1,
     depth: 0,
-    caller: ACTOR,
+    caller,
     target,
     bytecodeAddress: target,
     scheme: 'CALL',
     value: '0x0',
     inputLength: 4,
     selector,
+  }
+}
+
+function mediatedBeforeSwapOutcome() {
+  return {
+    poolId: PRIMARY_POOL_ID,
+    scenarioId: 'swap:exact-input:0-for-1:small',
+    operation: 'swap' as const,
+    status: 'completed' as const,
+    proof: proof({ calls: [call(HOOK, BEFORE_SWAP, POOL_MANAGER)] }),
   }
 }
 
@@ -137,7 +147,7 @@ function secondarySwapProof() {
   })
 }
 
-function session(options: { permissions?: boolean[]; directSucceeds?: boolean } = {}) {
+function session(options: { permissions?: boolean[]; directSucceeds?: boolean; throwSelectors?: Hex[] } = {}) {
   const calls: Hex[] = []
   const permissions = options.permissions ?? [false, false, false, false, false, false, true, false, false, false, false, false, false, false]
   return {
@@ -145,6 +155,7 @@ function session(options: { permissions?: boolean[]; directSucceeds?: boolean } 
     execute: async (input: ForkExecutionInput) => {
       const selector = input.transaction.calldata.slice(0, 10) as Hex
       calls.push(selector)
+      if (options.throwSelectors?.includes(selector)) throw new Error(`forced ${selector} failure`)
       if (input.transaction.to.toLowerCase() === ROUTER.toLowerCase()) return secondarySwapProof()
       if (selector === GET_PERMISSIONS) {
         return proof({ output: encodeAbiParameters(PERMISSION_OUTPUTS, permissions) })
@@ -171,6 +182,7 @@ describe('public Hacken runtime adaptations', () => {
       session: fake,
       context,
       pools: [primary, secondary],
+      outcomes: [mediatedBeforeSwapOutcome()],
       signal: new AbortController().signal,
     })
     const byId = new Map(probes.map((item) => [item.caseId, item]))
@@ -189,6 +201,7 @@ describe('public Hacken runtime adaptations', () => {
       session: session({ permissions: Array.from({ length: 14 }, () => false) }),
       context,
       pools: [primary],
+      outcomes: [mediatedBeforeSwapOutcome()],
       signal: new AbortController().signal,
     })
     expect(probes.find((item) => item.caseId === 'permissions-match-address')).toMatchObject({
@@ -204,11 +217,67 @@ describe('public Hacken runtime adaptations', () => {
       session: session({ directSucceeds: true }),
       context,
       pools: [primary],
+      outcomes: [mediatedBeforeSwapOutcome()],
       signal: new AbortController().signal,
     })
     expect(probes.find((item) => item.caseId === 'only-pool-manager')).toMatchObject({
       status: 'failed',
       observedOutcome: 'completed',
     })
+  })
+
+  it('does not infer callback authorization from an unmatched direct revert', async () => {
+    const fake = session()
+    const probes = await runPublicHackenRuntimeProbes({
+      session: fake,
+      context,
+      pools: [primary],
+      outcomes: [],
+      signal: new AbortController().signal,
+    })
+    expect(probes.find((item) => item.caseId === 'only-pool-manager')).toMatchObject({
+      status: 'unavailable',
+    })
+    expect(fake.calls.filter((selector) => selector === BEFORE_SWAP)).toHaveLength(0)
+  })
+
+  it('keeps optional selector failures independent', async () => {
+    const fake = session({ throwSelectors: [GET_PERMISSIONS] })
+    const probes = await runPublicHackenRuntimeProbes({
+      session: fake,
+      context,
+      pools: [primary],
+      outcomes: [mediatedBeforeSwapOutcome()],
+      signal: new AbortController().signal,
+    })
+    expect(probes.find((item) => item.caseId === 'permissions-match-address')).toMatchObject({ status: 'error' })
+    expect(probes.find((item) => item.caseId === 'base-hook-pool-manager')).toMatchObject({ status: 'passed' })
+    expect(probes.find((item) => item.caseId === 'introspect-optional-interface')).toMatchObject({ status: 'observed' })
+    expect(fake.calls).toEqual(expect.arrayContaining([GET_PERMISSIONS, GET_POOL_MANAGER, SUPPORTS_INTERFACE]))
+  })
+
+  it('uses one shared deadline instead of restarting a timeout for every optional probe', async () => {
+    const now = vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000)
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(1_002)
+    const fake = session()
+    try {
+      const probes = await runPublicHackenRuntimeProbes({
+        session: fake,
+        context,
+        pools: [primary],
+        outcomes: [mediatedBeforeSwapOutcome()],
+        signal: new AbortController().signal,
+        timeoutMs: 1,
+      })
+      expect(fake.calls).toHaveLength(1)
+      expect(probes.find((item) => item.caseId === 'permissions-match-address')).toMatchObject({ status: 'passed' })
+      expect(probes.find((item) => item.caseId === 'base-hook-pool-manager')).toMatchObject({ status: 'error' })
+      expect(probes.find((item) => item.caseId === 'introspect-optional-interface')).toMatchObject({ status: 'error' })
+      expect(probes.find((item) => item.caseId === 'only-pool-manager')?.scenarioIds).toEqual([])
+    } finally {
+      now.mockRestore()
+    }
   })
 })

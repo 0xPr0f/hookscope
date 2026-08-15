@@ -48,6 +48,7 @@ Copy `.env.example` to `.env` and add only the values needed for the environment
 | Variable | Purpose | Exposure |
 | --- | --- | --- |
 | `SUBGRAPH_API_KEY` | The Graph gateway access through the same-origin proxy | Server only |
+| `SUBGRAPH_REQUEST_ORIGIN` | Optional fixed Origin for a domain-restricted Graph key | Server only |
 | `VITE_RPC_<chainId>` | Optional per-chain browser RPC override | Public/browser |
 | `VITE_V4_SUBGRAPH_<chainId>` | Credential-free private or self-hosted indexer override | Public/browser |
 | `DATABASE_URL` | Optional completed-report persistence | Server only |

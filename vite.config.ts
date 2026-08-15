@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
  * read from `SUBGRAPH_API_KEY` in the node process and is never exposed to the
  * client: Vite only inlines `VITE_`-prefixed variables.
  */
-function subgraphProxy(apiKey: string | undefined): Plugin {
+function subgraphProxy(apiKey: string | undefined, requestOrigin: string | undefined): Plugin {
   const handler = async (request: IncomingMessage, response: ServerResponse, next: () => void) => {
     const path = request.url?.split('?', 1)[0] ?? ''
     const match = /^\/api\/subgraph\/(\d+)$/.exec(path)
@@ -32,7 +32,11 @@ function subgraphProxy(apiKey: string | undefined): Plugin {
 
     const upstream = await fetch(`${GRAPH_GATEWAY_ORIGIN}/api/subgraphs/id/${published.id}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        ...(requestOrigin ? { origin: requestOrigin } : {}),
+      },
       body: JSON.stringify({ query: expected, variables: body.variables }),
     })
     send(upstream.ok ? 200 : 502, await upstream.text())
@@ -52,7 +56,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
-    plugins: [subgraphProxy(env.SUBGRAPH_API_KEY), react()],
+    plugins: [subgraphProxy(
+      env.SUBGRAPH_API_KEY,
+      env.SUBGRAPH_REQUEST_ORIGIN || 'https://hook.centaurion.xyz',
+    ), react()],
     // EVMole's wasm-bindgen entrypoint resolves its binary relative to
     // import.meta.url. Prebundling relocates that module without its .wasm file.
     optimizeDeps: { exclude: ['evmole'] },

@@ -46,7 +46,10 @@ export const FIXTURE_SCENARIO_VERSION = 'hacken-browser-port/0.5.0'
 // 0.23.0: every selector exposed by a completed report is collected into one
 // provenance-bearing catalog. Exact verified ABIs and canonical interfaces
 // outrank global Sourcify 4byte candidates in every UI surface.
-export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.23.0'
+// 0.24.0: public callback authorization now requires paired successful
+// PoolManager mediation plus a comparable direct rejection. Runtime probes are
+// independently degradable and share one bounded time/hydration budget.
+export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.24.0'
 
 /** Prevents a behavior report produced by older orchestration from masquerading as current. */
 export function reportMatchesCurrentPipeline(report: AnalysisReport, fixture: boolean) {

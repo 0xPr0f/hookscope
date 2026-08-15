@@ -21,11 +21,10 @@ import {
  * is deliberately bounded to those executions; it is not a universal verdict.
  */
 
-// 0.5.0 adds pinned runtime adapters for canonical hook getters, ERC-165,
-// permission-selected direct callback authorization, and compatible secondary
-// PoolKeys. Older reports classified those six conditional cases without
-// executing them, so they are not semantically equivalent.
-export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.5.0'
+// 0.6.0 requires paired PoolManager-mediated/direct callback evidence, isolates
+// optional selector failures, and counts only runtime calls that returned an
+// execution proof. Older direct-revert results are not semantically equivalent.
+export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.6.0'
 export const PUBLIC_HACKEN_UPSTREAM_COMMIT = '965be6006eab54ff65b83285ef40a245c8735149'
 
 export type PublicHackenClassification = 'portable' | 'conditional' | 'fixture-only'
@@ -414,7 +413,7 @@ export function publicHackenSuiteEvidence(input: {
   return {
     id: 'hacken-public-pool-suite',
     detectorId: 'hacken-public-pool-suite',
-    detectorVersion: '0.5.0',
+    detectorVersion: '0.6.0',
     severity: failed ? 'medium' : warnings ? 'low' : 'info',
     evidenceClass: 'concrete-observation',
     subject: input.poolManager,
@@ -424,7 +423,7 @@ export function publicHackenSuiteEvidence(input: {
     affectedPools: input.pools.map((pool) => pool.poolId).slice(0, 20),
     reproducibility: 'replayed',
     technical: {
-      executionSource: 'protocol-native-generated',
+      executionSources: ['protocol-native-generated', 'hook-runtime-probe'],
       version: PUBLIC_HACKEN_VERSION,
       upstreamCommit: PUBLIC_HACKEN_UPSTREAM_COMMIT,
       catalogueSize: PUBLIC_HACKEN_CASES.length,

@@ -19,7 +19,26 @@ import { allowMethods, discoveryAllowed, requestIp } from '../_lib/http.js'
 
 const MAX_PAGE_SIZE = 1_000
 const MAX_CURSOR_LENGTH = 80
-const UPSTREAM_TIMEOUT_MS = 15_000
+// Finish before Vercel's 10-second function ceiling so callers receive a
+// structured 504 instead of a platform-level FUNCTION_INVOCATION_FAILED page.
+const UPSTREAM_TIMEOUT_MS = 8_500
+
+function validOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = new URL(value)
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== value) return undefined
+    return parsed.origin
+  } catch {
+    return undefined
+  }
+}
+
+export function graphRequestOrigin(request: VercelRequest) {
+  const header = request.headers.origin
+  const requestOrigin = Array.isArray(header) ? header[0] : header
+  return validOrigin(process.env.SUBGRAPH_REQUEST_ORIGIN) ?? validOrigin(requestOrigin)
+}
 
 function badRequest(response: VercelResponse, message: string) {
   return response.status(400).json({ error: message })
@@ -69,9 +88,14 @@ export default async function handler(request: VercelRequest, response: VercelRe
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
   try {
+    const origin = graphRequestOrigin(request)
     const upstream = await fetch(`${GRAPH_GATEWAY_ORIGIN}/api/subgraphs/id/${published.id}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        ...(origin ? { origin } : {}),
+      },
       body: JSON.stringify({ query: expectedQuery, variables }),
       signal: controller.signal,
     })

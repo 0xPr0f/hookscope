@@ -29,7 +29,9 @@ import type { ForkExecutionSession, ForkReplayResult } from './revmProof'
  */
 
 const PROBE_GAS_LIMIT = 2_000_000n
-const PROBE_TIMEOUT_MS = 20_000
+const PROBE_CALL_TIMEOUT_MS = 20_000
+const DEFAULT_PROBE_BUDGET_MS = 45_000
+const DEFAULT_PROBE_HYDRATION_BUDGET = 2_048
 const ZERO_BYTES32 = `0x${'0'.repeat(64)}` as Hex
 
 const GET_HOOK_PERMISSIONS_SELECTOR = toFunctionSelector('getHookPermissions()')
@@ -125,6 +127,29 @@ export type PublicHackenRuntimeProbe = {
 }
 
 type ProbeSession = Pick<ForkExecutionSession, 'execute'>
+
+type MediatedScenarioOutcome = {
+  poolId: Hex
+  scenarioId: string
+  status: 'completed' | 'reverted' | 'unavailable' | 'failed'
+  proof?: ForkReplayResult
+}
+
+type ProbeBudget = {
+  deadline: number
+  hydrationRequestsRemaining: number
+}
+
+type RuntimeProbeInput = {
+  session: ProbeSession
+  context: ProtocolScenarioContext
+  pools: PoolDescriptor[]
+  outcomes: readonly MediatedScenarioOutcome[]
+  signal: AbortSignal
+  budget: ProbeBudget
+  maxHydrationRequests?: number
+  onProgress?: (detail: string) => void
+}
 
 type DirectCallback = {
   permission: HookPermission
@@ -255,10 +280,24 @@ async function executeCall(input: {
   to: Address
   calldata: Hex
   signal: AbortSignal
+  budget: ProbeBudget
+  label: string
+  onProgress?: (detail: string) => void
   gasLimit?: bigint
   maxHydrationRequests?: number
 }): Promise<ForkReplayResult> {
-  return input.session.execute({
+  if (input.signal.aborted) throw new DOMException('Public-hook runtime probes cancelled', 'AbortError')
+  const timeRemaining = input.budget.deadline - Date.now()
+  if (timeRemaining <= 0) throw new Error('The shared public-hook runtime probe time budget was exhausted.')
+  if (input.budget.hydrationRequestsRemaining <= 0) {
+    throw new Error('The shared public-hook runtime hydration budget was exhausted.')
+  }
+  const hydrationLimit = Math.min(
+    input.maxHydrationRequests ?? input.budget.hydrationRequestsRemaining,
+    input.budget.hydrationRequestsRemaining,
+  )
+  input.onProgress?.(input.label)
+  const replay = await input.session.execute({
     transaction: {
       caller: input.context.actor,
       to: input.to,
@@ -273,10 +312,15 @@ async function executeCall(input: {
     },
     block: input.context.executionBlock,
     signal: input.signal,
-    timeoutMs: PROBE_TIMEOUT_MS,
-    maxHydrationRequests: input.maxHydrationRequests ?? 512,
+    timeoutMs: Math.min(PROBE_CALL_TIMEOUT_MS, timeRemaining),
+    maxHydrationRequests: hydrationLimit,
     commit: false,
   })
+  input.budget.hydrationRequestsRemaining = Math.max(
+    0,
+    input.budget.hydrationRequestsRemaining - replay.hydrationRequests,
+  )
+  return replay
 }
 
 function enteredTarget(replay: ForkReplayResult, target: Address, selector: Hex) {
@@ -314,30 +358,40 @@ function decodeCanonicalBool(output: Hex): boolean | undefined {
   return value === 0n ? false : value === 1n ? true : undefined
 }
 
-async function introspectionProbes(input: {
-  session: ProbeSession
-  context: ProtocolScenarioContext
-  signal: AbortSignal
-  maxHydrationRequests?: number
-}): Promise<PublicHackenRuntimeProbe[]> {
+async function introspectionProbes(input: RuntimeProbeInput): Promise<PublicHackenRuntimeProbe[]> {
   const { context } = input
   const base = { poolId: context.pool.poolId, hook: context.pool.hook }
-  const call = (calldata: Hex) => executeCall({
-    ...input,
-    to: context.pool.hook,
-    calldata,
-  })
-
-  const permissionReplay = await call(GET_HOOK_PERMISSIONS_SELECTOR)
-  const managerReplay = await call(POOL_MANAGER_SELECTOR)
   const erc165Calldata = encodeFunctionData({
     abi: SUPPORTS_INTERFACE_ABI,
     functionName: 'supportsInterface',
     args: ['0x01ffc9a7'],
   })
-  const erc165Replay = await call(erc165Calldata)
+  const attempt = async (label: string, calldata: Hex) => {
+    try {
+      return {
+        replay: await executeCall({
+          ...input,
+          to: context.pool.hook,
+          calldata,
+          label,
+        }),
+      }
+    } catch (error) {
+      if (input.signal.aborted) throw error
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  }
 
-  const returnedPermissions = permissionReplay.proof.success
+  // These reads are intentionally isolated. An absent or slow optional getter
+  // must not suppress evidence from the other selectors.
+  const permissionAttempt = await attempt('getHookPermissions() response', GET_HOOK_PERMISSIONS_SELECTOR)
+  const managerAttempt = await attempt('poolManager() response', POOL_MANAGER_SELECTOR)
+  const erc165Attempt = await attempt('supportsInterface(bytes4) response', erc165Calldata)
+  const permissionReplay = permissionAttempt.replay
+  const managerReplay = managerAttempt.replay
+  const erc165Replay = erc165Attempt.replay
+
+  const returnedPermissions = permissionReplay?.proof.success
     ? decodePermissions(permissionReplay.proof.output)
     : undefined
   const expectedPermissions = new Set(decodeHookPermissions(context.pool.hook))
@@ -345,47 +399,59 @@ async function introspectionProbes(input: {
     ? HOOK_FLAGS.map(([permission]) => permission).filter((permission) =>
         returnedPermissions[permission] !== expectedPermissions.has(permission))
     : []
-  const permissionStatus: PublicHackenRuntimeProbe['status'] = !returnedPermissions
-    ? 'unavailable'
+  const permissionStatus: PublicHackenRuntimeProbe['status'] = permissionAttempt.error
+    ? 'error'
+    : !returnedPermissions
+      ? 'unavailable'
     : mismatchedPermissions.length
       ? 'failed'
       : 'passed'
-  const permissionReason = !permissionReplay.proof.success
-    ? 'getHookPermissions() reverted at the pinned block; the optional getter was not treated as present.'
+  const permissionReason = permissionAttempt.error
+    ? `The getHookPermissions() selector probe could not complete: ${permissionAttempt.error}`
+    : !permissionReplay?.proof.success
+      ? 'The getHookPermissions() selector reverted at the pinned block; the optional response was not treated as present.'
     : !returnedPermissions
-      ? 'getHookPermissions() did not return the canonical 14-boolean Hooks.Permissions shape.'
+      ? 'The getHookPermissions() selector did not return the canonical 14-boolean Hooks.Permissions shape.'
       : mismatchedPermissions.length
-        ? `getHookPermissions() disagreed with the hook address bits for: ${mismatchedPermissions.join(', ')}.`
-        : 'The canonical getHookPermissions() result matched all 14 permission bits encoded in the hook address.'
+        ? `The canonical response to getHookPermissions() disagreed with the hook address bits for: ${mismatchedPermissions.join(', ')}.`
+        : 'The canonical response to getHookPermissions() matched all 14 permission bits encoded in the hook address. This proves the selector response, not source-level getter dispatch.'
 
-  const returnedManager = managerReplay.proof.success
+  const returnedManager = managerReplay?.proof.success
     ? decodeCanonicalAddress(managerReplay.proof.output)
     : undefined
   const managerMatches = returnedManager?.toLowerCase() === context.poolManager.toLowerCase()
-  const managerStatus: PublicHackenRuntimeProbe['status'] = !returnedManager
-    ? 'unavailable'
+  const managerStatus: PublicHackenRuntimeProbe['status'] = managerAttempt.error
+    ? 'error'
+    : !returnedManager
+      ? 'unavailable'
     : managerMatches
       ? 'passed'
       : 'failed'
-  const managerReason = !managerReplay.proof.success
-    ? 'poolManager() reverted at the pinned block; the optional getter was not treated as present.'
+  const managerReason = managerAttempt.error
+    ? `The poolManager() selector probe could not complete: ${managerAttempt.error}`
+    : !managerReplay?.proof.success
+      ? 'The poolManager() selector reverted at the pinned block; the optional response was not treated as present.'
     : !returnedManager
-      ? 'poolManager() did not return one canonical ABI-encoded address.'
+      ? 'The poolManager() selector did not return one canonical ABI-encoded address.'
       : managerMatches
-        ? `poolManager() returned the selected deployed PoolManager ${context.poolManager}.`
-        : `poolManager() returned ${returnedManager}, not the selected deployed PoolManager ${context.poolManager}.`
+        ? `The canonical response to poolManager() named the selected deployed PoolManager ${context.poolManager}. This proves the selector response, not source-level getter dispatch.`
+        : `The canonical response to poolManager() named ${returnedManager}, not the selected deployed PoolManager ${context.poolManager}.`
 
-  const interfaceSupport = erc165Replay.proof.success
+  const interfaceSupport = erc165Replay?.proof.success
     ? decodeCanonicalBool(erc165Replay.proof.output)
     : undefined
-  const interfaceReason = !erc165Replay.proof.success
-    ? 'supportsInterface(bytes4) reverted at the pinned block; ERC-165 introspection is unavailable.'
+  const interfaceReason = erc165Attempt.error
+    ? `The supportsInterface(bytes4) selector probe could not complete: ${erc165Attempt.error}`
+    : !erc165Replay?.proof.success
+      ? 'The supportsInterface(bytes4) selector reverted at the pinned block; ERC-165 introspection is unavailable.'
     : interfaceSupport === undefined
-      ? 'supportsInterface(bytes4) did not return one canonical ABI boolean.'
-      : `supportsInterface(0x01ffc9a7) returned ${interfaceSupport}; this is recorded without requiring ERC-165 support.`
+      ? 'The supportsInterface(bytes4) selector did not return one canonical ABI boolean.'
+      : `The canonical response to supportsInterface(0x01ffc9a7) was ${interfaceSupport}; this is recorded without claiming source-level ERC-165 implementation.`
 
   const gettersStatus: PublicHackenRuntimeProbe['status'] =
-    permissionStatus === 'failed' || managerStatus === 'failed'
+    permissionStatus === 'error' || managerStatus === 'error'
+      ? 'error'
+      : permissionStatus === 'failed' || managerStatus === 'failed'
       ? 'failed'
       : permissionStatus === 'passed' && managerStatus === 'passed'
         ? 'passed'
@@ -397,10 +463,12 @@ async function introspectionProbes(input: {
       caseId: 'permissions-match-address',
       status: permissionStatus,
       reason: permissionReason,
-      gasUsed: permissionReplay.proof.gasUsed,
-      scenarioIds: ['runtime:getHookPermissions'],
+      gasUsed: permissionReplay?.proof.gasUsed,
+      scenarioIds: permissionReplay ? ['runtime:getHookPermissions'] : undefined,
       details: {
         selector: GET_HOOK_PERMISSIONS_SELECTOR,
+        responseClassification: 'canonical-response',
+        selectorDispatchProven: false,
         returnedPermissions,
         expectedPermissions: [...expectedPermissions],
         mismatchedPermissions,
@@ -411,33 +479,46 @@ async function introspectionProbes(input: {
       caseId: 'base-hook-pool-manager',
       status: managerStatus,
       reason: managerReason,
-      gasUsed: managerReplay.proof.gasUsed,
-      scenarioIds: ['runtime:poolManager'],
-      details: { selector: POOL_MANAGER_SELECTOR, returnedManager, expectedManager: context.poolManager },
+      gasUsed: managerReplay?.proof.gasUsed,
+      scenarioIds: managerReplay ? ['runtime:poolManager'] : undefined,
+      details: {
+        selector: POOL_MANAGER_SELECTOR,
+        responseClassification: 'canonical-response',
+        selectorDispatchProven: false,
+        returnedManager,
+        expectedManager: context.poolManager,
+      },
     },
     {
       ...base,
       caseId: 'introspect-public-getters',
       status: gettersStatus,
       reason: gettersStatus === 'passed'
-        ? 'Both canonical public getters were callable and returned values consistent with the selected hook and PoolManager.'
+        ? 'Both selectors returned canonical values consistent with the selected hook and PoolManager; source-level getter dispatch was not inferred.'
         : gettersStatus === 'failed'
-          ? 'A canonical public getter returned a value inconsistent with the selected hook or PoolManager.'
-          : 'Both canonical public getter shapes could not be proven at the pinned block.',
-      gasUsed: permissionReplay.proof.gasUsed + managerReplay.proof.gasUsed,
-      scenarioIds: ['runtime:getHookPermissions', 'runtime:poolManager'],
+          ? 'A canonical selector response was inconsistent with the selected hook or PoolManager.'
+          : gettersStatus === 'error'
+            ? 'At least one public-selector probe could not complete inside the shared runtime budget.'
+            : 'Both canonical public-selector response shapes could not be proven at the pinned block.',
+      gasUsed: (permissionReplay?.proof.gasUsed ?? 0) + (managerReplay?.proof.gasUsed ?? 0) || undefined,
+      scenarioIds: [
+        ...(permissionReplay ? ['runtime:getHookPermissions'] : []),
+        ...(managerReplay ? ['runtime:poolManager'] : []),
+      ],
       details: { permissionStatus, managerStatus },
     },
     {
       ...base,
       caseId: 'introspect-optional-interface',
-      status: interfaceSupport === undefined ? 'unavailable' : 'observed',
+      status: erc165Attempt.error ? 'error' : interfaceSupport === undefined ? 'unavailable' : 'observed',
       reason: interfaceReason,
-      gasUsed: erc165Replay.proof.gasUsed,
-      scenarioIds: ['runtime:supportsInterface:01ffc9a7'],
-      observedOutcome: erc165Replay.proof.success ? 'completed' : 'reverted',
+      gasUsed: erc165Replay?.proof.gasUsed,
+      scenarioIds: erc165Replay ? ['runtime:supportsInterface:01ffc9a7'] : undefined,
+      observedOutcome: erc165Replay ? erc165Replay.proof.success ? 'completed' : 'reverted' : undefined,
       details: {
         selector: erc165Calldata.slice(0, 10),
+        responseClassification: 'canonical-response',
+        selectorDispatchProven: false,
         interfaceId: '0x01ffc9a7',
         supported: interfaceSupport,
       },
@@ -445,12 +526,7 @@ async function introspectionProbes(input: {
   ]
 }
 
-async function callbackAuthorizationProbe(input: {
-  session: ProbeSession
-  context: ProtocolScenarioContext
-  signal: AbortSignal
-  maxHydrationRequests?: number
-}): Promise<PublicHackenRuntimeProbe> {
+async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<PublicHackenRuntimeProbe> {
   const { context } = input
   const enabled = new Set(decodeHookPermissions(context.pool.hook))
   const callbacks = callbackCalldata(context).filter((callback) => enabled.has(callback.permission))
@@ -467,6 +543,38 @@ async function callbackAuthorizationProbe(input: {
     }
   }
 
+  const mediatedScenarioIds = (callback: DirectCallback) => input.outcomes.flatMap((outcome) => {
+    if (
+      outcome.poolId.toLowerCase() !== context.pool.poolId.toLowerCase()
+      || outcome.status !== 'completed'
+      || !outcome.proof?.proof.success
+    ) return []
+    const managerMediated = outcome.proof.proof.calls.some((call) =>
+      call.caller.toLowerCase() === context.poolManager.toLowerCase()
+      && call.target.toLowerCase() === context.pool.hook.toLowerCase()
+      && call.selector?.toLowerCase() === callback.selector.toLowerCase())
+    return managerMediated ? [outcome.scenarioId] : []
+  })
+  const paired = callbacks.map((callback) => ({
+    ...callback,
+    mediatedScenarioIds: mediatedScenarioIds(callback),
+  })).filter((callback) => callback.mediatedScenarioIds.length)
+  const unpaired = callbacks.filter((callback) =>
+    !paired.some((candidate) => candidate.permission === callback.permission))
+  if (!paired.length) {
+    return {
+      ...base,
+      status: 'unavailable',
+      reason: 'No enabled callback had both a successful PoolManager-mediated execution and a comparable direct-call input at the pinned block. A direct revert alone is not treated as an authorization result.',
+      details: {
+        unpairedCallbacks: unpaired.map((callback) => ({
+          permission: callback.permission,
+          selector: callback.selector,
+        })),
+      },
+    }
+  }
+
   const observations: {
     permission: HookPermission
     selector: Hex
@@ -474,19 +582,24 @@ async function callbackAuthorizationProbe(input: {
     gasUsed?: number
     output?: Hex
     reason?: string
+    executed: boolean
+    mediatedScenarioIds: string[]
   }[] = []
-  for (const callback of callbacks) {
+  for (const callback of paired) {
     try {
       const replay = await executeCall({
         ...input,
         to: context.pool.hook,
         calldata: callback.calldata,
+        label: `direct ${callback.permission} comparison`,
       })
       if (!enteredTarget(replay, context.pool.hook, callback.selector)) {
         observations.push({
           permission: callback.permission,
           selector: callback.selector,
           outcome: 'error',
+          executed: true,
+          mediatedScenarioIds: callback.mediatedScenarioIds,
           reason: 'The direct call produced no trace inside the hook.',
         })
         continue
@@ -497,6 +610,8 @@ async function callbackAuthorizationProbe(input: {
         outcome: replay.proof.success ? 'completed' : 'reverted',
         gasUsed: replay.proof.gasUsed,
         output: replay.proof.output,
+        executed: true,
+        mediatedScenarioIds: callback.mediatedScenarioIds,
       })
     } catch (error) {
       if (input.signal.aborted) throw error
@@ -504,6 +619,8 @@ async function callbackAuthorizationProbe(input: {
         permission: callback.permission,
         selector: callback.selector,
         outcome: 'error',
+        executed: false,
+        mediatedScenarioIds: callback.mediatedScenarioIds,
         reason: error instanceof Error ? error.message : String(error),
       })
     }
@@ -516,25 +633,37 @@ async function callbackAuthorizationProbe(input: {
     ? 'error'
     : completed.length
       ? 'failed'
-      : 'passed'
+      : unpaired.length
+        ? 'observed'
+        : 'passed'
   const reason = errors.length
-    ? `${errors.length}/${observations.length} permission-selected direct callback probes did not produce a valid hook execution trace.`
+      ? `${errors.length}/${observations.length} permission-selected direct callback probes did not produce a valid hook execution trace.`
     : completed.length
-      ? `${completed.length}/${observations.length} permission-selected callbacks completed when called directly by a non-PoolManager account.`
-      : `All ${reverted.length} permission-selected callbacks rejected the direct non-PoolManager caller. This demonstrates rejection for these concrete calls; it does not infer the hook's internal guard implementation.`
+      ? `${completed.length}/${observations.length} callbacks that had completed through the PoolManager also completed when called directly by a non-PoolManager account.`
+      : unpaired.length
+        ? `${reverted.length} callback${reverted.length === 1 ? '' : 's'} completed through the PoolManager and rejected the comparable direct call; ${unpaired.length} enabled callback${unpaired.length === 1 ? '' : 's'} lacked a successful mediated execution, so full callback compatibility was not asserted.`
+        : `All ${reverted.length} enabled callbacks first completed through the deployed PoolManager and then rejected the comparable direct non-PoolManager call. This is bounded execution compatibility, not an inference about the hook's source-level guard.`
 
   return {
     ...base,
     status,
     reason,
     gasUsed: observations.reduce((sum, item) => sum + (item.gasUsed ?? 0), 0) || undefined,
-    scenarioIds: observations.map((item) => `runtime:direct:${item.permission}`),
+    scenarioIds: observations
+      .filter((item) => item.executed)
+      .map((item) => `runtime:direct:${item.permission}`),
     observedOutcome: completed.length && reverted.length
       ? 'mixed'
       : completed.length
         ? 'completed'
         : 'reverted',
-    details: { callbacks: observations },
+    details: {
+      callbacks: observations,
+      unpairedCallbacks: unpaired.map((callback) => ({
+        permission: callback.permission,
+        selector: callback.selector,
+      })),
+    },
   }
 }
 
@@ -549,13 +678,7 @@ function compatibleSecondaryPool(context: ProtocolScenarioContext, pools: PoolDe
     .sort((left, right) => left.poolId.localeCompare(right.poolId))[0]
 }
 
-async function secondaryPoolProbe(input: {
-  session: ProbeSession
-  context: ProtocolScenarioContext
-  pools: PoolDescriptor[]
-  signal: AbortSignal
-  maxHydrationRequests?: number
-}): Promise<PublicHackenRuntimeProbe> {
+async function secondaryPoolProbe(input: RuntimeProbeInput): Promise<PublicHackenRuntimeProbe> {
   const { context } = input
   const base = {
     caseId: 'secondary-pool-open-policy',
@@ -584,6 +707,7 @@ async function secondaryPoolProbe(input: {
       ...input,
       to: context.router,
       calldata: scenario.calldata,
+      label: `secondary PoolId ${secondary.poolId.slice(0, 10)} swap`,
       gasLimit: 16_000_000n,
       maxHydrationRequests: input.maxHydrationRequests ?? 2_048,
     })
@@ -640,31 +764,26 @@ export async function runPublicHackenRuntimeProbes(input: {
   session: ProbeSession
   context: ProtocolScenarioContext
   pools: PoolDescriptor[]
+  outcomes?: readonly MediatedScenarioOutcome[]
   signal: AbortSignal
+  timeoutMs?: number
   maxHydrationRequests?: number
+  onProgress?: (detail: string) => void
 }): Promise<PublicHackenRuntimeProbe[]> {
-  const probes: PublicHackenRuntimeProbe[] = []
-  try {
-    probes.push(...await introspectionProbes(input))
-  } catch (error) {
-    if (input.signal.aborted) throw error
-    const reason = error instanceof Error ? error.message : String(error)
-    for (const caseId of [
-      'permissions-match-address',
-      'base-hook-pool-manager',
-      'introspect-public-getters',
-      'introspect-optional-interface',
-    ]) {
-      probes.push({
-        caseId,
-        poolId: input.context.pool.poolId,
-        hook: input.context.pool.hook,
-        status: 'error',
-        reason,
-      })
-    }
+  const runtimeInput: RuntimeProbeInput = {
+    ...input,
+    outcomes: input.outcomes ?? [],
+    budget: {
+      deadline: Date.now() + Math.max(1, input.timeoutMs ?? DEFAULT_PROBE_BUDGET_MS),
+      hydrationRequestsRemaining: Math.max(
+        1,
+        input.maxHydrationRequests ?? DEFAULT_PROBE_HYDRATION_BUDGET,
+      ),
+    },
   }
-  probes.push(await callbackAuthorizationProbe(input))
-  probes.push(await secondaryPoolProbe(input))
+  const probes: PublicHackenRuntimeProbe[] = []
+  probes.push(...await introspectionProbes(runtimeInput))
+  probes.push(await callbackAuthorizationProbe(runtimeInput))
+  probes.push(await secondaryPoolProbe(runtimeInput))
   return probes
 }

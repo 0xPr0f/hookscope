@@ -337,17 +337,39 @@ describe('generated PoolManager scenarios in browser revm', () => {
     } as ProtocolScenarioContext
 
     try {
+      const mediatedSwap = await session.execute({
+        transaction: {
+          executionMode: 'simulation',
+          caller: ACTOR,
+          to: allowed,
+          calldata: swapCalldata({ zeroForOne: true, amountSpecified: -1_000n, hookData: '0x' }),
+          value: 0n,
+          gasLimit: 16_000_000n,
+          gasPrice: 0n,
+          nonce: 0,
+          chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+        },
+        block: FIXTURE_BLOCK,
+        commit: false,
+      })
+      expect(mediatedSwap.proof.success).toBe(true)
       const probes = await runPublicHackenRuntimeProbes({
         session,
         context,
         pools: [primary, secondary],
+        outcomes: [{
+          poolId: primary.poolId,
+          scenarioId: 'swap:exact-input:0-for-1:small',
+          status: 'completed',
+          proof: mediatedSwap,
+        }],
         signal: new AbortController().signal,
       })
       const byId = new Map(probes.map((probe) => [probe.caseId, probe]))
       expect(byId.get('permissions-match-address')).toMatchObject({ status: 'passed' })
       expect(byId.get('base-hook-pool-manager')).toMatchObject({ status: 'passed' })
       expect(byId.get('introspect-public-getters')).toMatchObject({ status: 'passed' })
-      expect(byId.get('only-pool-manager')).toMatchObject({ status: 'passed' })
+      expect(byId.get('only-pool-manager')).toMatchObject({ status: 'observed', observedOutcome: 'reverted' })
       expect(byId.get('secondary-pool-open-policy')).toMatchObject({ status: 'passed' })
     } finally {
       session.close()
