@@ -39,7 +39,7 @@ use revm::{
     MainBuilder, MainContext,
 };
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(feature = "libafl-fuzz")]
 use std::sync::Once;
 use wasm_bindgen::prelude::*;
@@ -106,6 +106,11 @@ struct CallEvidence {
     /// retained.
     #[serde(skip_serializing_if = "Option::is_none")]
     selector: Option<String>,
+    /// Outcome of this exact frame. A successful child can still be rolled back
+    /// later when one of its ancestors reverts.
+    outcome: &'static str,
+    /// Whether this frame's state/log effects survived into the final result.
+    committed: bool,
 }
 
 /// A storage-family opcode with the key it addressed, and the value for writes.
@@ -153,13 +158,21 @@ struct EvidenceInspector {
     steps: Vec<StepEvidence>,
     storage_operations: Vec<StorageAccessEvidence>,
     calls: Vec<CallEvidence>,
-    logs: Vec<LogEvidence>,
-    log_count: usize,
-    selfdestructs: Vec<(String, String, String)>,
+    selfdestructs: Vec<(u64, String, String, String)>,
     truncated: bool,
     step_limit: usize,
     frame_stack: Vec<u64>,
+    frame_parents: HashMap<u64, Option<u64>>,
+    rolled_back_frames: HashSet<u64>,
     next_frame_id: u64,
+}
+
+struct FinalizedInspectorEvidence {
+    steps: Vec<StepEvidence>,
+    storage_operations: Vec<StorageAccessEvidence>,
+    calls: Vec<CallEvidence>,
+    selfdestructs: Vec<(String, String, String)>,
+    truncated: bool,
 }
 
 impl Default for EvidenceInspector {
@@ -174,12 +187,12 @@ impl EvidenceInspector {
             steps: Vec::new(),
             storage_operations: Vec::new(),
             calls: Vec::new(),
-            logs: Vec::new(),
-            log_count: 0,
             selfdestructs: Vec::new(),
             truncated: false,
             step_limit: step_limit.clamp(64, MAX_STEP_EVENTS),
             frame_stack: Vec::new(),
+            frame_parents: HashMap::new(),
+            rolled_back_frames: HashSet::new(),
             next_frame_id: 1,
         }
     }
@@ -192,12 +205,100 @@ impl EvidenceInspector {
         self.next_frame_id = self.next_frame_id.saturating_add(1);
         let parent_frame_id = self.frame_stack.last().copied();
         let depth = self.frame_stack.len();
+        self.frame_parents.insert(frame_id, parent_frame_id);
         self.frame_stack.push(frame_id);
         (frame_id, parent_frame_id, depth)
     }
 
-    fn pop_frame(&mut self) {
-        self.frame_stack.pop();
+    fn pop_frame(&mut self) -> Option<u64> {
+        self.frame_stack.pop()
+    }
+
+    fn is_descendant_or_self(&self, frame_id: u64, root_frame_id: u64) -> bool {
+        let mut current = Some(frame_id);
+        while let Some(frame) = current {
+            if frame == root_frame_id {
+                return true;
+            }
+            current = self.frame_parents.get(&frame).copied().flatten();
+        }
+        false
+    }
+
+    /// Marks a reverted/halted frame and every child effect as rolled back.
+    /// Children may have returned successfully before an ancestor reverted, so
+    /// their individual outcome and their final committed status are distinct.
+    fn mark_rolled_back(&mut self, root_frame_id: u64) {
+        let affected = self
+            .frame_parents
+            .keys()
+            .copied()
+            .filter(|frame_id| self.is_descendant_or_self(*frame_id, root_frame_id))
+            .collect::<Vec<_>>();
+        self.rolled_back_frames.extend(affected.iter().copied());
+        for call in &mut self.calls {
+            if affected.contains(&call.frame_id) {
+                call.committed = false;
+            }
+        }
+    }
+
+    fn finish_call_frame(&mut self, frame_id: u64, outcome: &'static str, succeeded: bool) {
+        if let Some(call) = self.calls.iter_mut().find(|call| call.frame_id == frame_id) {
+            call.outcome = outcome;
+            call.committed = succeeded;
+        }
+        if !succeeded {
+            self.mark_rolled_back(frame_id);
+        }
+    }
+
+    fn finalize(mut self) -> FinalizedInspectorEvidence {
+        // A frame without call_end/create_end is not safe to present as a
+        // committed state source, even if the outer executor returned.
+        let pending = self
+            .calls
+            .iter()
+            .filter(|call| call.outcome == "pending")
+            .map(|call| call.frame_id)
+            .collect::<Vec<_>>();
+        for frame_id in pending {
+            self.mark_rolled_back(frame_id);
+            if let Some(call) = self.calls.iter_mut().find(|call| call.frame_id == frame_id) {
+                call.outcome = "unknown";
+            }
+        }
+
+        let storage_operations = self
+            .storage_operations
+            .into_iter()
+            .filter(|operation| !self.rolled_back_frames.contains(&operation.frame_id))
+            .collect();
+        let selfdestructs = self
+            .selfdestructs
+            .into_iter()
+            .filter(|(frame_id, _, _, _)| !self.rolled_back_frames.contains(frame_id))
+            .map(|(_, contract, target, value)| (contract, target, value))
+            .collect();
+        FinalizedInspectorEvidence {
+            steps: self.steps,
+            storage_operations,
+            calls: self.calls,
+            selfdestructs,
+            truncated: self.truncated,
+        }
+    }
+}
+
+fn log_evidence(log: &Log) -> LogEvidence {
+    LogEvidence {
+        address: format!("{:?}", log.address),
+        topics: log
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:?}"))
+            .collect(),
+        data: format!("0x{}", hex::encode(&log.data.data)),
     }
 }
 
@@ -286,12 +387,25 @@ where
             value: inputs.transfer_value().unwrap_or(U256::ZERO).to_string(),
             input_length: inputs.input.len(),
             selector,
+            outcome: "pending",
+            committed: true,
         });
         None
     }
 
-    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
-        self.pop_frame();
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        let Some(frame_id) = self.pop_frame() else {
+            return;
+        };
+        let succeeded = outcome.result.is_ok();
+        let label = if succeeded {
+            "success"
+        } else if outcome.result.is_revert() {
+            "revert"
+        } else {
+            "halt"
+        };
+        self.finish_call_frame(frame_id, label, succeeded);
     }
 
     fn create(&mut self, _context: &mut CTX, _inputs: &mut CreateInputs) -> Option<CreateOutcome> {
@@ -303,30 +417,20 @@ where
         &mut self,
         _context: &mut CTX,
         _inputs: &CreateInputs,
-        _outcome: &mut CreateOutcome,
+        outcome: &mut CreateOutcome,
     ) {
-        self.pop_frame();
-    }
-
-    fn log(&mut self, _context: &mut CTX, log: Log) {
-        self.log_count += 1;
-        if self.logs.len() < MAX_LOG_EVENTS {
-            self.logs.push(LogEvidence {
-                address: format!("{:?}", log.address),
-                topics: log
-                    .topics()
-                    .iter()
-                    .map(|topic| format!("{topic:?}"))
-                    .collect(),
-                data: format!("0x{}", hex::encode(&log.data.data)),
-            });
-        } else {
-            self.truncated = true;
+        let Some(frame_id) = self.pop_frame() else {
+            return;
+        };
+        if !outcome.result.is_ok() {
+            self.mark_rolled_back(frame_id);
         }
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        let frame_id = self.frame_stack.last().copied().unwrap_or(0);
         self.selfdestructs.push((
+            frame_id,
             format!("{contract:?}"),
             format!("{target:?}"),
             value.to_string(),
@@ -436,6 +540,15 @@ fn execute_decoded(
             .map_err(|error| format!("revm execution failed: {error}"))?
     };
     let result = result_and_state.result;
+    let log_count = result.logs().len();
+    let logs = result
+        .logs()
+        .iter()
+        .take(MAX_LOG_EVENTS)
+        .map(log_evidence)
+        .collect::<Vec<_>>();
+    let logs_truncated = logs.len() != log_count;
+    let evidence = inspector.finalize();
     Ok(ExecutionProof {
         engine: "revm/36.0.0",
         success: result.is_success(),
@@ -444,15 +557,15 @@ fn execute_decoded(
             .output()
             .map(|bytes| format!("0x{}", hex::encode(bytes)))
             .unwrap_or_else(|| "0x".to_owned()),
-        steps: inspector.steps,
-        storage_operations: inspector.storage_operations,
-        calls: inspector.calls,
+        steps: evidence.steps,
+        storage_operations: evidence.storage_operations,
+        calls: evidence.calls,
         storage_diffs: state_diffs(&result_and_state.state),
         balance_changes: balance_changes(&result_and_state.state),
-        logs: inspector.logs,
-        log_count: inspector.log_count,
-        selfdestructs: inspector.selfdestructs,
-        truncated: inspector.truncated,
+        logs,
+        log_count,
+        selfdestructs: evidence.selfdestructs,
+        truncated: evidence.truncated || logs_truncated,
     })
 }
 

@@ -4,6 +4,7 @@ import type { SelectorSignatureLookup } from '../../domain/selectors'
 import { SelectorAwareText } from '../selectors/SelectorDisplay'
 import {
   buildScenarioConsoleSuites,
+  filterScenarioConsoleSuites,
   HACKEN_UPSTREAM_COMMIT,
   SCENARIO_STATUS_LABELS,
   type ScenarioConsoleLine,
@@ -148,9 +149,10 @@ function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSui
   )
 }
 
-export function ScenarioResults({ report }: { report: AnalysisReport }) {
-  const suites = buildScenarioConsoleSuites(report)
-  const fixtureReport = suites.some((suite) => suite.id === 'hacken-port' && suite.ran)
+export function ScenarioResults({ report, selectedPoolId = 'all' }: { report: AnalysisReport; selectedPoolId?: string }) {
+  const completeSuites = buildScenarioConsoleSuites(report)
+  const fixtureReport = completeSuites.some((suite) => suite.id === 'hacken-port' && suite.ran)
+  const suites = filterScenarioConsoleSuites(completeSuites, fixtureReport ? 'all' : selectedPoolId)
   return (
     <section className="scenario-results">
       <div className="report-section-heading">

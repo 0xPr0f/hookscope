@@ -24,8 +24,9 @@ import {
 import { collectSignedPayloads, signedPayloadLimitation, type SignedPayload } from '../adapters/uniswapV4SignedPayloads'
 import { forwardedPositionManagerCalls, observedPositionManagerTargets } from './positionManagerResolution'
 import { observationSummary, summarizeExecutionObservations } from './executionObservations'
-import { currencyDeltaSummary, decodeCurrencyDeltas, deltasFullySettled } from './currencyDeltas'
+import { currencyDeltaSummary, decodeCurrencyDeltaTimelines, decodeCurrencyDeltas, deltasFullySettled } from './currencyDeltas'
 import { dynamicFeeSummary, summarizeDynamicFees } from './poolEvents'
+import { observeHookCharge } from './hookCharge'
 import { fetchPositionManagerPosition, type PositionManagerPosition } from '../data/positionManagerPosition'
 import type { Evidence, PoolDescriptor } from '../domain/report'
 import type { LivePoolReplayCoverage, PoolReplayOutcome } from './livePoolReplay'
@@ -377,12 +378,29 @@ function evidence(
     accounts: [outcome.actor, outcome.router, poolManager, outcome.hook].filter((value): value is Address => Boolean(value)),
     currencies: outcome.currencies ?? [],
   })
+  const deltaTimelines = decodeCurrencyDeltaTimelines({
+    proof,
+    poolManager,
+    accounts: [outcome.actor, outcome.router, poolManager, outcome.hook].filter((value): value is Address => Boolean(value)),
+    currencies: outcome.currencies ?? [],
+  })
+  const hookCharge = outcome.currencies
+    ? observeHookCharge({
+        proof,
+        poolManager,
+        poolId: outcome.poolId,
+        hook: outcome.hook,
+        currency0: outcome.currencies[0],
+        currency1: outcome.currencies[1],
+        poolFee: outcome.poolFee ?? 0,
+      })
+    : undefined
   const repeatedEnvelope = result.scenario.mutation === 'repeated-sequence'
   const historicalReplay = result.scenario.mutation === 'historical-replay'
   return {
     id: `live-router:${outcome.poolId.slice(2, 14)}:${result.scenario.id}:${result.scenario.calldata.slice(-8)}`,
     detectorId: 'live-v4-router-variant',
-    detectorVersion: '0.2.0',
+    detectorVersion: '0.5.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: outcome.hook,
@@ -423,7 +441,9 @@ function evidence(
       observations: [observationSummary(observations), currencyDeltaSummary(deltas), dynamicFeeSummary(fees)].filter(Boolean).join(' · ') || undefined,
       dynamicFee: fees,
       currencyDeltas: deltas,
+      currencyDeltaTimelines: deltaTimelines,
       deltasSettled: deltas.length ? deltasFullySettled(deltas) : undefined,
+      hookCharge,
       logs: observations.logs.slice(0, 32),
       eventSignatures: observations.eventSignatures,
       netValueMovement: observations.netValueMovement,

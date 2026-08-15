@@ -133,6 +133,7 @@ export const analysisReportSchema = z.object({
   chainName: z.string(),
   token: addressSchema,
   tokenSymbol: z.string().max(32).optional(),
+  tokenName: z.string().max(128).optional(),
   blockNumber: z.string(),
   blockHash: hexSchema,
   blockTagPolicy: z.string(),

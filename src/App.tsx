@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Activity, ArrowRight, Check, ChevronRight, CircleStop, Download, ExternalLink, Moon, RotateCcw, Settings, Sun } from 'lucide-react'
+import { zeroAddress, type Address } from 'viem'
 import { CHAINS, getChainConfig } from './config/chains'
 import { toViemChain } from './data/rpc'
 import { shortAddress } from './domain/address'
-import { formatPoolFee } from './domain/poolFee'
+import { DYNAMIC_FEE_FLAG, formatPoolFee } from './domain/poolFee'
 import type { AnalysisReport, Severity } from './domain/report'
 import type { CompletedReportCurrentness } from './data/reportCurrentness'
 import { FIXTURE_SCAN_ADDRESS } from './fixtures/bytecode'
@@ -13,11 +14,13 @@ import { ScenarioResults } from './features/scenarios/ScenarioResults'
 import { scenarioConsoleCheckCount } from './features/scenarios/scenarioTranscript'
 import { EvidenceLedger } from './features/evidence/EvidenceLedger'
 import { ChainDropdown } from './components/ChainDropdown'
+import { AppDropdown, type AppDropdownOption } from './components/AppDropdown'
 import { HowItWorksPage, MethodologyPage } from './pages/InformationPages'
 import { informationPageForPath } from './pages/informationRoutes'
 import { RpcSettingsDialog } from './features/settings/RpcSettingsDialog'
 import { SelectorAwareText } from './features/selectors/SelectorDisplay'
 import { applyTheme, initialTheme, saveThemePreference, THEME_STORAGE_KEY, type AppTheme } from './data/themePreference'
+import { summarizePoolHookCharges, type PoolHookChargeSummary } from './features/analyzer/hookChargeSummary'
 
 const ContractSourceWorkspace = lazy(() => import('./features/source/ContractSourceWorkspace').then((module) => ({ default: module.ContractSourceWorkspace })))
 
@@ -36,6 +39,20 @@ function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function reportCurrencyLabel(report: AnalysisReport, nativeSymbol: string, currency: Address) {
+  if (currency.toLowerCase() === zeroAddress) return nativeSymbol
+  if (currency.toLowerCase() === report.token.toLowerCase()) return report.tokenSymbol ?? shortAddress(currency)
+  return shortAddress(currency)
+}
+
+function reportPoolLabel(report: AnalysisReport, nativeSymbol: string, pool: AnalysisReport['pools'][number]) {
+  return `${reportCurrencyLabel(report, nativeSymbol, pool.currency0)} / ${reportCurrencyLabel(report, nativeSymbol, pool.currency1)}`
+}
+
+function shortPoolId(poolId: string) {
+  return `${poolId.slice(0, 8)}…${poolId.slice(-6)}`
+}
+
 function downloadReport(report: AnalysisReport) {
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
   const link = document.createElement('a')
@@ -43,6 +60,39 @@ function downloadReport(report: AnalysisReport) {
   link.download = `hookscope-${report.chainId}-${report.token}.json`
   link.click()
   URL.revokeObjectURL(link.href)
+}
+
+function PoolEconomics({ poolFee, hookCharge }: { poolFee: number; hookCharge: PoolHookChargeSummary }) {
+  const title = `${hookCharge.reason}${hookCharge.unquantifiedSamples ? ` ${hookCharge.unquantifiedSamples} additional execution${hookCharge.unquantifiedSamples === 1 ? '' : 's'} could not be quantified.` : ''}`
+  return (
+    <div className="pool-economics" title={title}>
+      <span className="pool-cost pool-lp-fee">
+        <small>Pool LP fee</small>
+        <b>{formatPoolFee(poolFee)}</b>
+        {(poolFee === DYNAMIC_FEE_FLAG || hookCharge.lpFeeDirectionalDifference) && hookCharge.lpFeeDirections.length > 0 && (
+          <span className="cost-direction-details">
+            {hookCharge.lpFeeDirections.map((direction) => <span key={direction.direction}>{direction.direction} {direction.label}</span>)}
+          </span>
+        )}
+      </span>
+      <span className={`pool-cost pool-hook-charge hook-charge-${hookCharge.status}`}>
+        <small>Observed hook charge</small>
+        {hookCharge.status === 'observed'
+          ? (
+              <span className="hook-charge-directions">
+                {hookCharge.directions.map((direction) => (
+                  <b key={direction.direction}>
+                    <span><em>{direction.direction}</em>{direction.label}</span>
+                    {direction.allInLabel && <small>all-in {direction.allInLabel}</small>}
+                  </b>
+                ))}
+                {hookCharge.directionalDifference && <i>Directional</i>}
+              </span>
+            )
+          : <b>{hookCharge.status === 'none-observed' ? 'None in samples' : 'Not quantified'}</b>}
+      </span>
+    </div>
+  )
 }
 
 function PhaseRail({ report }: { report: AnalysisReport }) {
@@ -77,6 +127,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
   onContinue: (cursor: string) => void
 }) {
   const [tab, setTab] = useState<'overview' | 'evidence' | 'contracts' | 'tests'>('overview')
+  const [testPoolId, setTestPoolId] = useState<string>('all')
   const impact = strongestImpact(report)
   const materialFindings = report.findings.filter((finding) => finding.severity !== 'info')
   const callbackFacts = report.findings.filter((finding) => finding.detectorId === 'hook-permission-bits')
@@ -86,13 +137,71 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
   const explorer = reportChain.blockExplorers?.default
   const explorerBaseUrl = explorer?.url.replace(/\/$/, '')
   const explorerName = explorer?.name ?? 'chain explorer'
-  const testCheckCount = useMemo(() => scenarioConsoleCheckCount(report), [report])
+  const poolHookCharges = new Map(report.pools.map((pool) => [
+    pool.poolId.toLowerCase(),
+    summarizePoolHookCharges({ pool, token: report.token, findings: report.findings }),
+  ]))
+  const tokenDisplayName = report.tokenName
+    ? `${report.tokenName}${report.tokenSymbol ? ` (${report.tokenSymbol})` : ''}`
+    : report.tokenSymbol ?? shortAddress(report.token)
+  const effectiveTestPoolId = testPoolId === 'all'
+    || report.pools.some((pool) => pool.poolId.toLowerCase() === testPoolId.toLowerCase())
+    ? testPoolId
+    : 'all'
+  const fixtureConformanceReport = report.blockTagPolicy === 'deterministic-fixture'
+  // The deterministic fixture suite is a separate oracle product and is not
+  // scoped to the synthetic discovery pools shown in its overview.
+  const transcriptPoolId = fixtureConformanceReport ? 'all' : effectiveTestPoolId
+  // The React compiler can derive these report-field dependencies more
+  // precisely than manual memos, and this view does not render on scan progress.
+  const testCheckCount = scenarioConsoleCheckCount(report, transcriptPoolId)
+  const testPoolOptions: AppDropdownOption<string>[] = fixtureConformanceReport ? [{
+    value: 'all',
+    label: 'All fixture checks',
+    description: 'Deterministic conformance suite · one pinned oracle context',
+  }] : [
+    {
+      value: 'all',
+      label: 'All selected pools',
+      description: `${report.pools.length} pool${report.pools.length === 1 ? '' : 's'} · combined test results`,
+    },
+    ...report.pools.map((pool) => ({
+      value: pool.poolId,
+      label: reportPoolLabel(report, reportChain.nativeCurrency.symbol, pool),
+      description: `Hook ${shortAddress(pool.hook)} · Pool ${shortPoolId(pool.poolId)}`,
+    })),
+  ]
   return (
     <section className="report" aria-live="polite">
       <div className="report-topline">
         <span className="completed-mark"><Check size={13} /> Completed browser report</span>
         <span>Block {report.blockNumber} · {report.blockTagPolicy}</span>
         <span>{formatDate(report.createdAt)}</span>
+      </div>
+      <div className="report-identity-bar">
+        <div className="report-token-identity">
+          <span>Analyzed token</span>
+          <div>
+            <strong>{tokenDisplayName}</strong>
+            <code title={report.token}>{shortAddress(report.token)}</code>
+          </div>
+        </div>
+        <div className="report-pool-identities">
+          <span>Test results pool</span>
+          <AppDropdown
+            ariaLabel="Filter test results by pool"
+            className="report-pool-filter"
+            density="compact"
+            menuMaxHeight={300}
+            value={effectiveTestPoolId}
+            options={testPoolOptions}
+            disabled={fixtureConformanceReport}
+            onChange={(poolId) => {
+              setTestPoolId(poolId)
+              setTab('tests')
+            }}
+          />
+        </div>
       </div>
       {currentnessStatus === 'checking' && (
         <div className="currentness-note currentness-checking" role="status">
@@ -153,7 +262,10 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
                   const poolTransactionHash = pool.transactionHash ?? pool.replayTransactions?.[0]?.transactionHash
                   return (
                     <div className="pool-row" key={pool.poolId}>
-                      <span className="pool-fee"><b>{formatPoolFee(pool.fee)}</b> fee</span>
+                      <PoolEconomics
+                        poolFee={pool.fee}
+                        hookCharge={poolHookCharges.get(pool.poolId.toLowerCase())!}
+                      />
                       {explorerBaseUrl
                         ? (
                             <a
@@ -244,7 +356,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
           </Suspense>
         </div>
       )}
-      {tab === 'tests' && <div id="report-panel-tests" role="tabpanel" className="report-tab-panel"><ScenarioResults report={report} /></div>}
+      {tab === 'tests' && <div id="report-panel-tests" role="tabpanel" className="report-tab-panel"><ScenarioResults report={report} selectedPoolId={transcriptPoolId} /></div>}
     </section>
   )
 }

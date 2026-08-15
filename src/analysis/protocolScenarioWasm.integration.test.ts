@@ -20,6 +20,7 @@ import { deriveScenarioMutationMask, isScenarioDerivative } from './protocolScen
 import { selectExplorationSeeds } from './protocolScenarioExploration'
 import { runErc20RoundTrip } from './erc20RoundTrip'
 import { runPublicHackenRuntimeProbes } from './publicHackenRuntime'
+import { observeHookCharge } from './hookCharge'
 import type { PoolDescriptor } from '../domain/report'
 import type { ProtocolScenarioContext } from './protocolScenarioContext'
 
@@ -50,6 +51,9 @@ const BALANCE_ABI = parseAbi(['function balanceOf(address owner) view returns (u
 const INITIALIZE_ABI = parseAbi([
   'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
   'function initialize(PoolKey key, uint160 sqrtPriceX96) returns (int24 tick)',
+])
+const CONFIGURE_RETURN_DELTAS_ABI = parseAbi([
+  'function configureReturnDeltas(int128 specified,int128 afterSwap,int128 liquidityAmount0,int128 liquidityAmount1)',
 ])
 
 const FIXTURE_BLOCK: ForkReplayBlock = {
@@ -268,6 +272,8 @@ describe('generated PoolManager scenarios in browser revm', () => {
     // Reaching both is what makes this an observation about the deployed pool.
     expect(targets).toContain(HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase())
     expect(targets).toContain(HACKEN_FIXTURE_CONTEXT.hook.toLowerCase())
+    expect(step.proof.calls.every((call: RevmCallEvidence) =>
+      call.outcome !== undefined && call.committed !== undefined)).toBe(true)
     expect(overlay.patched.poolManager).toBe(HACKEN_FIXTURE_CONTEXT.poolManager)
   })
 
@@ -294,9 +300,9 @@ describe('generated PoolManager scenarios in browser revm', () => {
 
     expect(step.status, `fork step failed: ${step.message ?? ''}`).toBe('complete')
     expect(step.proof.success).toBe(false)
-    expect(step.proof.calls.some((call: RevmCallEvidence) =>
+    expect(step.proof.calls.find((call: RevmCallEvidence) =>
       call.target.toLowerCase() === HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase()
-      && call.selector === '0x6276cbbe')).toBe(true)
+      && call.selector === '0x6276cbbe')).toMatchObject({ outcome: 'revert', committed: false })
   })
 
   it('runs strict public-hook runtime adaptations in the browser engine', async () => {
@@ -469,6 +475,80 @@ describe('generated PoolManager scenarios in browser revm', () => {
       expect(step.proof.success, `swap reverted: ${step.proof.output}`).toBe(true)
       expect(step.proof.calls.map((call: RevmCallEvidence) => call.target.toLowerCase()))
         .toContain(HACKEN_FIXTURE_CONTEXT.hook.toLowerCase())
+    }
+  })
+
+  it('reconstructs a real positive return delta as a hook charge', async () => {
+    ready()
+    const allowed = HACKEN_FIXTURE_CONTEXT.swapRouter
+    const { snapshot } = snapshotWithHarness(allowed)
+    const session = directForkSession('hook-charge-return-delta', snapshot)
+    try {
+      const configured = await session.execute({
+        transaction: {
+          executionMode: 'simulation',
+          caller: ACTOR,
+          to: HACKEN_FIXTURE_CONTEXT.hook,
+          calldata: encodeFunctionData({
+            abi: CONFIGURE_RETURN_DELTAS_ABI,
+            functionName: 'configureReturnDeltas',
+            args: [100n, 0n, 0n, 0n],
+          }),
+          value: 0n,
+          gasLimit: 1_000_000n,
+          gasPrice: 0n,
+          nonce: 0,
+          chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+        },
+        block: FIXTURE_BLOCK,
+        commit: true,
+      })
+      expect(configured.proof.success).toBe(true)
+
+      const execution = await session.execute({
+        transaction: {
+          executionMode: 'simulation',
+          caller: ACTOR,
+          to: allowed,
+          calldata: swapCalldata({ zeroForOne: true, amountSpecified: -1_000n, hookData: '0x' }),
+          value: 0n,
+          gasLimit: 16_000_000n,
+          gasPrice: 0n,
+          nonce: 0,
+          chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+          traceLimit: 4_096,
+        },
+        block: FIXTURE_BLOCK,
+      })
+      expect(execution.proof.success).toBe(true)
+
+      const observation = observeHookCharge({
+        proof: execution.proof,
+        poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
+        poolId: HACKEN_FIXTURE_CONTEXT.poolId,
+        hook: HACKEN_FIXTURE_CONTEXT.hook,
+        currency0: HACKEN_FIXTURE_CONTEXT.currency0,
+        currency1: HACKEN_FIXTURE_CONTEXT.currency1,
+        poolFee: HACKEN_FIXTURE_CONTEXT.fee,
+      })
+      expect(observation.status, JSON.stringify({
+        reason: observation.reason,
+        calls: execution.proof.calls,
+        storageOperations: execution.proof.storageOperations.filter((operation) => operation.opcode === 'TSTORE'),
+        timelines: observation.hookDeltaTimelines,
+      }, null, 2)).toBe('observed')
+      expect(observation.primaryRatePpm).toBe(111_111)
+      expect(observation.components[0]).toMatchObject({
+        side: 'input',
+        amount: '100',
+        denominator: '900',
+        ratePpm: 111_111,
+        allInDenominator: '1000',
+        allInRatePpm: 100_000,
+      })
+      expect(observation.hookDeltaTimelines[0]?.values).toEqual(['-100', '0'])
+    } finally {
+      session.close()
     }
   })
 

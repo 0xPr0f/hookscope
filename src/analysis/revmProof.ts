@@ -26,6 +26,10 @@ export type RevmCallEvidence = {
   inputLength: number
   /** First four input bytes; absent only when the call carried fewer than four. */
   selector?: Hex
+  /** Final frame outcome. Absent on reports produced by older engines. */
+  outcome?: 'success' | 'revert' | 'halt' | 'unknown'
+  /** False when the frame's state and logs were rolled back by itself or an ancestor. */
+  committed?: boolean
 }
 export type RevmStorageDiff = { address: string; slot: Hex; before: Hex; after: Hex }
 /**

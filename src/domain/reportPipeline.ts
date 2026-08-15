@@ -52,7 +52,24 @@ export const FIXTURE_SCENARIO_VERSION = 'hacken-browser-port/0.5.0'
 // 0.25.0: zero-liquidity prerequisites no longer become public assertion
 // contradictions, exact receipt-matched replays appear in the test transcript,
 // and report-backed check/execution totals have unambiguous semantics.
-export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.25.0'
+// 0.27.0: hook charges are derived from the signed return-delta transition in
+// one frame-attributed PoolManager swap. Positive returned deltas are charges,
+// negative returned deltas are rebates, and duplicate exact replays are counted
+// once in directional summaries.
+// 0.28.0: bounded instruction-PC truncation no longer discards complete logs
+// and storage observations, and one swap can be isolated from other bundled
+// PoolManager operations. Reports from 0.27.0 can therefore under-report a
+// settled hook charge as not quantified.
+// 0.29.0: proof logs, storage writes, and destructive effects now reflect the
+// final rollback-aware execution result. Attempted call frames remain visible
+// with explicit outcome/commit status, but reverted child evidence can no
+// longer be attributed as a settled hook charge. Directional summaries also
+// preserve simultaneous input/output components instead of flattening them
+// into a false across-execution percentage range.
+// 0.30.0: hook charges use one comparable pool-trade denominator in both
+// directions, retain input surcharges' all-in share separately, and never turn
+// an execution without a positive quantified delta into a measured 0% rate.
+export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.30.0'
 
 /** Prevents a behavior report produced by older orchestration from masquerading as current. */
 export function reportMatchesCurrentPipeline(report: AnalysisReport, fixture: boolean) {

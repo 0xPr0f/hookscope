@@ -3,7 +3,9 @@ use super::{
     coverage_index, outcome_fingerprint, register_libafl_types, ExplorationWitness,
     FUZZ_COVERAGE_MAP_SIZE, MAX_FUZZ_INPUT_BYTES,
 };
-use super::{balance_changes, state_diffs, EvidenceInspector, ExecutionProof};
+use super::{
+    balance_changes, log_evidence, state_diffs, EvidenceInspector, ExecutionProof, MAX_LOG_EVENTS,
+};
 #[cfg(feature = "libafl-fuzz")]
 use libafl::{
     corpus::InMemoryCorpus,
@@ -470,6 +472,15 @@ fn run_database(
         }
     };
     let result = result_and_state.result;
+    let log_count = result.logs().len();
+    let logs = result
+        .logs()
+        .iter()
+        .take(MAX_LOG_EVENTS)
+        .map(log_evidence)
+        .collect::<Vec<_>>();
+    let logs_truncated = logs.len() != log_count;
+    let evidence = inspector.finalize();
     let storage_diffs = state_diffs(&result_and_state.state);
     let balance_changes = balance_changes(&result_and_state.state);
     if commit {
@@ -487,15 +498,15 @@ fn run_database(
                 .output()
                 .map(|bytes| format!("0x{}", hex::encode(bytes)))
                 .unwrap_or_else(|| "0x".to_owned()),
-            steps: inspector.steps,
-            storage_operations: inspector.storage_operations,
-            calls: inspector.calls,
+            steps: evidence.steps,
+            storage_operations: evidence.storage_operations,
+            calls: evidence.calls,
             storage_diffs,
             balance_changes,
-            logs: inspector.logs,
-            log_count: inspector.log_count,
-            selfdestructs: inspector.selfdestructs,
-            truncated: inspector.truncated,
+            logs,
+            log_count,
+            selfdestructs: evidence.selfdestructs,
+            truncated: evidence.truncated || logs_truncated,
         },
     }
 }
@@ -1073,6 +1084,70 @@ mod tests {
         assert_eq!(write.address, IMPLEMENTATION);
         assert_eq!(write.storage_address, TARGET);
         assert!(proof.storage_diffs.iter().any(|diff| diff.address == TARGET));
+    }
+
+    #[test]
+    fn reverted_child_logs_and_storage_do_not_enter_committed_proof_evidence() {
+        const CHILD: &str = "0x1111111111111111111111111111111111111111";
+        const TARGET: &str = "0xffffffffffffffffffffffffffffffffffffffff";
+        const CALLER: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+        // Child: SSTORE slot 0 = 1, emit LOG1(topic 1), then REVERT.
+        let mut child = account(CHILD, "0x6001600055600160006000a160006000fd");
+        child.storage_complete = true;
+        // Parent: CALL the child, deliberately ignore its false result, emit
+        // LOG1(topic 2), and return successfully.
+        let mut target = account(
+            TARGET,
+            &format!(
+                "0x6000600060006000600073{}5af150600260006000a100",
+                &CHILD[2..]
+            ),
+        );
+        target.storage_complete = true;
+        let mut caller = account(CALLER, "0x");
+        caller.storage_complete = true;
+        let mut beneficiary = account(&Address::ZERO.to_string(), "0x");
+        beneficiary.storage_complete = true;
+
+        let ForkStep::Complete { proof } = run_snapshot(
+            ForkSnapshot {
+                accounts: vec![caller, target, child, beneficiary],
+                block_hashes: vec![],
+            },
+            transaction(),
+            block(),
+        ) else {
+            panic!("caught-revert fixture did not complete")
+        };
+
+        assert!(proof.success, "the parent catches the child revert");
+        assert_eq!(proof.log_count, 1, "only the committed parent log survives");
+        assert_eq!(proof.logs.len(), 1);
+        assert!(proof.logs[0].topics[0].ends_with('2'));
+        assert!(
+            proof
+                .storage_operations
+                .iter()
+                .all(|operation| operation.address != CHILD),
+            "rolled-back child writes must not be published as state evidence"
+        );
+        assert!(proof.storage_diffs.iter().all(|diff| diff.address != CHILD));
+
+        let child_call = proof
+            .calls
+            .iter()
+            .find(|call| call.target == CHILD)
+            .expect("child call must remain visible as attempted execution");
+        assert_eq!(child_call.outcome, "revert");
+        assert!(!child_call.committed);
+        let root_call = proof
+            .calls
+            .iter()
+            .find(|call| call.target == TARGET)
+            .expect("root call must be recorded");
+        assert_eq!(root_call.outcome, "success");
+        assert!(root_call.committed);
     }
 
     #[cfg(feature = "libafl-fuzz")]

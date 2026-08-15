@@ -196,6 +196,17 @@ h1 { max-width: 780px; margin: 16px 0 16px; font-size: clamp(42px, 5.1vw, 66px);
 
 .report { border-bottom: 1px solid var(--line); }
 .report-topline { display: flex; gap: 22px; align-items: center; min-height: 42px; border-bottom: 1px solid var(--line); color: #7b7c77; font-size: 10px; }
+.report-identity-bar { display: grid; grid-template-columns: minmax(220px, .72fr) minmax(0, 1.7fr); gap: 18px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.report-token-identity, .report-pool-identities { min-width: 0; }
+.report-token-identity { display: grid; gap: 7px; }
+.report-token-identity > span, .report-pool-identities > span { color: #8a8c86; font-size: 8px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.report-token-identity > div { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
+.report-token-identity strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.report-token-identity code { flex: 0 0 auto; color: #858781; font-size: 9px; }
+.report-pool-identities { display: grid; gap: 7px; }
+.report-pool-filter { width: min(540px, 100%); }
+.report-pool-filter .app-dropdown-trigger { background: var(--panel); }
+.report-pool-filter .app-dropdown-menu { width: 100%; }
 .completed-mark { display: inline-flex; gap: 6px; align-items: center; color: var(--green); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .currentness-note { padding: 12px 14px; border-bottom: 1px solid var(--line); border-left: 3px solid #9b9d97; background: var(--soft); color: var(--muted); font-size: 11px; line-height: 1.5; }
 .currentness-checking { border-left-color: var(--amber); }
@@ -307,15 +318,31 @@ h1 { max-width: 780px; margin: 16px 0 16px; font-size: clamp(42px, 5.1vw, 66px);
 .report-columns > section:last-child { border-right: 0; }
 .report-columns h3 { margin: 9px 0 18px; font-size: 18px; letter-spacing: -.025em; }
 .pool-list { border-top: 1px solid var(--line); }
-.pool-row { display: grid; grid-template-columns: 80px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); color: #656761; font-size: 10px; }
+.pool-row { display: grid; grid-template-columns: minmax(168px, .9fr) minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); color: #656761; font-size: 10px; }
 .pool-row b { color: var(--ink); }
 .pool-row code { color: #8a8c86; }
+.pool-economics { min-width: 0; display: flex; align-items: stretch; gap: 1px; }
+.pool-cost { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 7px 8px; background: var(--soft); }
+.pool-cost small { color: var(--quiet); font-size: 7px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.pool-cost > b { font-size: 10px; }
+.pool-lp-fee { flex: 0 0 auto; }
+.cost-direction-details { display: grid; gap: 1px; color: var(--muted); font-size: 7px; text-transform: capitalize; }
+.pool-hook-charge { flex: 1 1 auto; }
+.hook-charge-directions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; }
+.hook-charge-directions b { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 0; white-space: nowrap; }
+.hook-charge-directions b > span { display: inline-flex; align-items: baseline; gap: 3px; }
+.hook-charge-directions b > small { color: var(--quiet); font-size: 6px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; }
+.hook-charge-directions em { color: var(--quiet); font-size: 7px; font-style: normal; text-transform: uppercase; }
+.hook-charge-directions i { padding: 2px 4px; border: 1px solid color-mix(in srgb, var(--orange) 38%, var(--line)); color: var(--orange); font-size: 6px; font-style: normal; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.hook-charge-none-observed > b, .hook-charge-not-quantified > b { color: var(--muted); font-weight: 600; }
 .pool-explorer-link { min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .pool-explorer-link:hover { color: var(--orange); }
 .pool-explorer-link:focus-visible { outline: 2px solid var(--orange); outline-offset: 3px; }
 .pool-hook-link { justify-self: start; }
 .pool-id-link { justify-self: end; white-space: nowrap; }
 .pool-explorer-link:hover code { color: currentColor; }
+.hook-charge-reason { margin: 0; padding: 11px 10px; border-bottom: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 10px; line-height: 1.55; }
+.hook-charge-table { min-width: 600px; }
 .section-copy { color: var(--muted); font-size: 11px; line-height: 1.6; }
 .capability-list { padding: 0; margin: 0; list-style: none; }
 .capability-list li { display: grid; grid-template-columns: 14px 1fr auto; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 11px; text-transform: capitalize; }
@@ -785,6 +812,7 @@ footer { height: 86px; display: flex; justify-content: space-between; align-item
   .assessment-primary { grid-column: auto; }
   .assessment-grid > div { border-right: 0; border-bottom: 1px solid var(--line); padding-left: 0 !important; }
   .report-topline { flex-wrap: wrap; padding: 10px 0; gap: 8px 14px; }
+  .report-identity-bar { grid-template-columns: 1fr; gap: 12px; }
   .phase-rail { grid-template-columns: repeat(2, 1fr); }
   .phase-node { padding: 10px 8px; }
   .report-section-heading { align-items: flex-start; gap: 14px; }
@@ -802,7 +830,8 @@ footer { height: 86px; display: flex; justify-content: space-between; align-item
   .evidence-facts > div:nth-child(1), .evidence-facts > div:nth-child(2) { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
   .evidence-witness { grid-template-columns: 1fr; }
   .evidence-witness > div:nth-child(even) { border-left: 0; }
-  .pool-row { grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; }
+  .pool-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; }
+  .pool-economics { grid-column: 1; grid-row: 1; }
   .pool-hook-link { grid-column: 1 / -1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
   .pool-id-link { grid-column: 2; grid-row: 1; }
   .report-actions { flex-direction: column; }

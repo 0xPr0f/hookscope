@@ -2,6 +2,8 @@ import type { Address, Hex, PublicClient } from 'viem'
 import { runForkReplay, type ForkReplayResult } from './revmProof'
 import type { Evidence, PoolDescriptor, PoolReplayKind, PoolReplayReference } from '../domain/report'
 import { loadPoolReplayCandidate, replayReferencesForPool, type PoolReplayCandidate } from '../data/replay'
+import { decodeCurrencyDeltaTimelines } from './currencyDeltas'
+import { observeHookCharge } from './hookCharge'
 
 export type PoolReplayOutcome = {
   poolId: Hex
@@ -73,14 +75,14 @@ export function assertReplayMatchesReceipt(replay: ForkReplayResult, candidate: 
   if (mismatches.length) throw new Error(`revm replay did not match the chain receipt: ${mismatches.join(', ')}.`)
 }
 
-function replayEvidence(outcome: PoolReplayOutcome): Evidence | undefined {
+function replayEvidence(outcome: PoolReplayOutcome, poolManager: Address, pool: PoolDescriptor): Evidence | undefined {
   const { candidate, replay } = outcome
   if (!candidate || !replay) return
   const firstStorage = replay.proof.storageDiffs[0]
   return {
     id: `revm-pool-replay:${candidate.kind}:${candidate.transactionHash}`,
     detectorId: 'revm-pool-replay',
-    detectorVersion: '0.3.0',
+    detectorVersion: '0.6.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: candidate.transaction.to,
@@ -114,11 +116,28 @@ function replayEvidence(outcome: PoolReplayOutcome): Evidence | undefined {
       hydratedStorageSlots: replay.hydratedStorageSlots,
       calls: replay.proof.calls,
       storageOperations: replay.proof.storageOperations,
+      currencyDeltaTimelines: decodeCurrencyDeltaTimelines({
+        proof: replay.proof,
+        poolManager,
+        accounts: [pool.hook, candidate.transaction.caller, candidate.transaction.to, poolManager],
+        currencies: [pool.currency0, pool.currency1],
+      }),
+      hookCharge: candidate.kind === 'swap'
+        ? observeHookCharge({
+            proof: replay.proof,
+            poolManager,
+            poolId: pool.poolId,
+            hook: pool.hook,
+            currency0: pool.currency0,
+            currency1: pool.currency1,
+            poolFee: pool.fee,
+          })
+        : undefined,
     },
   }
 }
 
-function coverageFromOutcomes(pools: PoolDescriptor[], candidateCount: number, outcomes: PoolReplayOutcome[]): LivePoolReplayCoverage {
+function coverageFromOutcomes(poolManager: Address, pools: PoolDescriptor[], candidateCount: number, outcomes: PoolReplayOutcome[]): LivePoolReplayCoverage {
   const passed = outcomes.filter((outcome) => outcome.status === 'passed')
   const failed = outcomes.filter((outcome) => outcome.status === 'failed')
   const coveredPoolIds = new Set(passed.map((outcome) => outcome.poolId.toLowerCase()))
@@ -147,7 +166,8 @@ function coverageFromOutcomes(pools: PoolDescriptor[], candidateCount: number, o
     coveredPools: coveredPoolIds.size,
     outcomes,
     findings: passed.flatMap((outcome) => {
-      const finding = replayEvidence(outcome)
+      const pool = pools.find((candidate) => candidate.poolId.toLowerCase() === outcome.poolId.toLowerCase())
+      const finding = pool ? replayEvidence(outcome, poolManager, pool) : undefined
       return finding ? [finding] : []
     }),
     hydrationRequests: passed.reduce((total, outcome) => total + (outcome.replay?.hydrationRequests ?? 0), 0),
@@ -256,5 +276,5 @@ export async function runLivePoolReplays(input: {
     if (poolOrder !== 0) return poolOrder
     return (left.kind ?? '').localeCompare(right.kind ?? '')
   })
-  return coverageFromOutcomes(input.pools, attempted, outcomes)
+  return coverageFromOutcomes(input.poolManager, input.pools, attempted, outcomes)
 }

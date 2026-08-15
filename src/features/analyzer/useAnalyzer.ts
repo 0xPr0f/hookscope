@@ -538,6 +538,7 @@ export function useAnalyzer() {
       let hasMore = false
       let nextCursor: string | undefined
       let tokenSymbol: string | undefined
+      let tokenName: string | undefined
       let scanClient: PublicClient | undefined
       let pinDetail: string
       let discoveryDetail: string
@@ -568,6 +569,7 @@ export function useAnalyzer() {
         discovered = fixture.pools.length
         hasMore = pools.length < discovered
         tokenSymbol = 'DEMO'
+        tokenName = 'Hookscope deterministic fixture'
         pinDetail = `Block ${blockNumber} · deterministic fixture`
         discoveryDetail = `${pools.length} deterministic pools`
         resolveDetail = `${subjects.length} codehash fixtures`
@@ -605,6 +607,7 @@ export function useAnalyzer() {
         hasMore = sources.hasMore
         nextCursor = sources.nextCursor
         tokenSymbol = sources.tokenMetadata.symbol
+        tokenName = sources.tokenMetadata.name
         pinDetail = `Block ${blockNumber}`
         discoveryDetail = sources.discovery.source === 'index+tail'
           ? `${discovered} pools · index verified + recent tail · ${sources.discovery.requests} reads`
@@ -1117,6 +1120,7 @@ export function useAnalyzer() {
         chainName: chain.name,
         token: getAddress(token),
         tokenSymbol,
+        tokenName,
         blockNumber: blockNumber.toString(),
         blockHash,
         blockTagPolicy: blockPolicy,

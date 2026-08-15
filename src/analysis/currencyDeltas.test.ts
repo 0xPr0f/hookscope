@@ -3,6 +3,7 @@ import type { Address, Hex } from 'viem'
 import {
   currencyDeltaSlot,
   currencyDeltaSummary,
+  decodeCurrencyDeltaTimelines,
   decodeCurrencyDeltas,
   decodeSignedDelta,
   deltasFullySettled,
@@ -85,6 +86,23 @@ describe('Uniswap v4 currency deltas', () => {
     expect(currencyDeltaSummary(deltas)).toContain('all settled to zero')
   })
 
+  it('retains the ordered intermediate values after a delta settles', () => {
+    const slot = currencyDeltaSlot(ACTOR, CURRENCY0)
+    expect(decodeCurrencyDeltaTimelines({
+      proof: proof([tstore(slot, word(100n)), tstore(slot, word(40n)), tstore(slot, word(0n))]),
+      poolManager: MANAGER,
+      accounts: [ACTOR],
+      currencies: [CURRENCY0],
+    })).toEqual([{
+      account: ACTOR,
+      currency: CURRENCY0,
+      slot,
+      values: ['100', '40', '0'],
+      finalDelta: '0',
+      settled: true,
+    }])
+  })
+
   it('ignores transient writes that are not a known account/currency pair', () => {
     expect(decodeCurrencyDeltas({
       proof: proof([tstore(`0x${'ab'.repeat(32)}` as Hex, word(-5n))]),
@@ -116,6 +134,21 @@ describe('Uniswap v4 currency deltas', () => {
       accounts: [ACTOR],
       currencies: [CURRENCY0],
     })[0]).toMatchObject({ account: ACTOR, currency: CURRENCY0, delta: '-5' })
+  })
+
+  it('can scope delta timelines to one operation frame tree', () => {
+    const slot = currencyDeltaSlot(ACTOR, CURRENCY0)
+    expect(decodeCurrencyDeltaTimelines({
+      proof: proof([
+        { ...tstore(slot, word(-7n)), frameId: 2 },
+        { ...tstore(slot, word(-99n)), frameId: 8 },
+        { ...tstore(slot, word(0n)), frameId: 2 },
+      ]),
+      poolManager: MANAGER,
+      accounts: [ACTOR],
+      currencies: [CURRENCY0],
+      frameIds: new Set([2]),
+    })[0]?.values).toEqual(['-7', '0'])
   })
 
   it('reports nothing when execution wrote no transient storage', () => {

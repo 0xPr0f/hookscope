@@ -82,7 +82,7 @@ export function PoolPicker({ discovery, onAnalyze }: {
                     <small title={pool.poolId}>Pool {pool.poolId.slice(0, 12)}…</small>
                   </span>
                   <span className="pool-choice-facts">
-                    <span>{formatPoolFee(pool.fee)} fee</span>
+                    <span>{formatPoolFee(pool.fee)} pool LP fee</span>
                     <span>{pool.activity.toLocaleString()} indexed actions</span>
                     <span className={hooked ? 'hooked' : 'hookless'}>{hooked ? `Hook ${shortAddress(pool.hook)}` : 'No hook'}</span>
                   </span>
@@ -117,4 +117,3 @@ export function PoolPicker({ discovery, onAnalyze }: {
     </section>
   )
 }
-

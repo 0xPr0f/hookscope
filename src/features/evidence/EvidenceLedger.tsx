@@ -10,6 +10,9 @@ import {
 } from '../selectors/SelectorDisplay'
 import { selectorAwareJson, selectorsForDisplay } from '../selectors/selectorPresentation'
 import { EVIDENCE_SEVERITY_META, groupEvidenceBySeverity } from './evidenceGrouping'
+import { formatPoolFee } from '../../domain/poolFee'
+import { formatRatePpm } from '../../analysis/hookCharge'
+import { readHookChargeObservation } from '../analyzer/hookChargeSummary'
 
 type StorageLayoutEntry = {
   slot: string
@@ -60,6 +63,7 @@ function EvidenceRow({ finding, selectorSignatures }: { finding: Evidence; selec
   const [open, setOpen] = useState(false)
   const detailId = `evidence-detail-${finding.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   const storageLayout = storageLayoutFromTechnical(finding.technical)
+  const hookCharge = readHookChargeObservation(finding.technical?.hookCharge)
   const technicalSelectors = useMemo(
     () => selectorsForDisplay(finding.technical, selectorSignatures).map((entry) => entry.selector),
     [finding.technical, selectorSignatures],
@@ -189,6 +193,49 @@ function EvidenceRow({ finding, selectorSignatures }: { finding: Evidence; selec
             <div className="evidence-block">
               <h4>Function and error selectors <span>{technicalSelectors.length}</span></h4>
               <SelectorCatalogList selectors={technicalSelectors} lookup={selectorSignatures} subject={finding.subject} />
+            </div>
+          )}
+
+          {hookCharge && (
+            <div className="evidence-block hook-charge-evidence">
+              <h4>Hook accounting <span>{hookCharge.status.replace('-', ' ')}</span></h4>
+              <dl className="evidence-witness">
+                <div><dt>Pool LP fee</dt><dd>{formatPoolFee(hookCharge.poolFee)}</dd></div>
+                <div><dt>Observed LP fee</dt><dd>{hookCharge.observedLpFee === undefined ? 'Not observed' : formatRatePpm(hookCharge.observedLpFee)}</dd></div>
+                <div><dt>Hook charge · trade basis</dt><dd>{hookCharge.primaryRatePpm === undefined
+                  ? hookCharge.components.length > 1 ? 'Multiple components' : 'Not observed'
+                  : formatRatePpm(hookCharge.primaryRatePpm)}</dd></div>
+                <div><dt>Hook-funded rebate</dt><dd>{hookCharge.rebateComponents.length
+                  ? hookCharge.rebateComponents.map((component) => formatRatePpm(component.ratePpm)).join(', ')
+                  : 'Not observed'}</dd></div>
+                <div><dt>Input currency</dt><dd><code>{hookCharge.inputCurrency ?? 'Not observed'}</code></dd></div>
+                <div><dt>Output currency</dt><dd><code>{hookCharge.outputCurrency ?? 'Not observed'}</code></dd></div>
+              </dl>
+              <p className="hook-charge-reason">{hookCharge.reason}</p>
+              {(hookCharge.components.length > 0 || hookCharge.rebateComponents.length > 0) && (
+                <div className="evidence-table-scroll">
+                  <table className="evidence-storage-table hook-charge-table">
+                    <thead><tr><th>Kind</th><th>Side</th><th>Currency</th><th>Amount</th><th>Trade basis</th><th>Trade rate</th><th>All-in basis</th><th>All-in rate</th></tr></thead>
+                    <tbody>
+                      {[
+                        ...hookCharge.components.map((component) => ({ ...component, kind: 'charge' as const })),
+                        ...hookCharge.rebateComponents.map((component) => ({ ...component, kind: 'rebate' as const })),
+                      ].map((component) => (
+                        <tr key={`${component.kind}-${component.side}-${component.currency}`}>
+                          <td>{component.kind}</td>
+                          <td>{component.side}</td>
+                          <td><code>{component.currency}</code></td>
+                          <td><code>{component.amount}</code></td>
+                          <td><code>{component.denominator}</code></td>
+                          <td>{formatRatePpm(component.ratePpm)}</td>
+                          <td><code>{component.allInDenominator ?? '—'}</code></td>
+                          <td>{component.allInRatePpm === undefined ? '—' : formatRatePpm(component.allInRatePpm)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 

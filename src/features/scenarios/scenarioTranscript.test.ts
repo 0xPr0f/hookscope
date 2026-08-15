@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { AnalysisReport, Evidence } from '../../domain/report'
-import { buildScenarioConsoleSuites, scenarioConsoleCheckCount, type ScenarioConsoleSuite } from './scenarioTranscript'
+import {
+  buildScenarioConsoleSuites,
+  filterScenarioConsoleSuites,
+  scenarioConsoleCheckCount,
+  type ScenarioConsoleSuite,
+} from './scenarioTranscript'
 
 /** Indexing by id keeps a suite assertion honest if the console order changes. */
 function suite(suites: ScenarioConsoleSuite[], id: ScenarioConsoleSuite['id']) {
@@ -38,6 +43,36 @@ function finding(overrides: Partial<Evidence>): Evidence {
 }
 
 describe('scenario console transcript', () => {
+  it('filters every suite to one pool and recomputes visible counts without double-counting shared runs', () => {
+    const firstPool = `0x${'1'.repeat(64)}`
+    const secondPool = `0x${'2'.repeat(64)}`
+    const source: ScenarioConsoleSuite = {
+      id: 'hacken-public',
+      name: 'HackenPublicPoolAssertions',
+      description: 'test',
+      version: '1',
+      ran: true,
+      lines: [
+        { id: 'a', poolId: firstPool, section: 'SWAP', name: 'test_a()', status: 'COMPATIBLE', executionIds: [`${firstPool}:swap`] },
+        { id: 'b', poolId: firstPool, section: 'DELTA', name: 'test_b()', status: 'WARN', executionIds: [`${firstPool}:swap`] },
+        { id: 'c', poolId: secondPool, section: 'SWAP', name: 'test_c()', status: 'CONTRADICTED', executionIds: [`${secondPool}:swap`] },
+      ],
+      passed: 1,
+      warned: 1,
+      failed: 1,
+      observed: 0,
+      unavailable: 0,
+      errored: 0,
+      skipped: 0,
+      executions: 2,
+    }
+
+    const [filtered] = filterScenarioConsoleSuites([source], firstPool)
+    expect(filtered).toMatchObject({ ran: true, passed: 1, warned: 1, failed: 0, executions: 1 })
+    expect(filtered?.lines.map((line) => line.id)).toEqual(['a', 'b'])
+    expect(filterScenarioConsoleSuites([source], 'all')[0]?.lines).toHaveLength(3)
+  })
+
   it('maps Hacken assertions and gas totals to Foundry-style lines', () => {
     const suites = buildScenarioConsoleSuites(report([finding({
       technical: { upstream: 'test_Swap_SmallAmount', section: 'swap', status: 'passed', stepOutcomes: [{ gasUsed: '10' }, { gasUsed: '15' }] },

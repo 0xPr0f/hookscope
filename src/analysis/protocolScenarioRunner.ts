@@ -3,8 +3,9 @@ import type { SelectorSignatureLookup } from '../data/signatureDatabase'
 import type { Evidence, PoolDescriptor } from '../domain/report'
 import { ForkExecutionSession, type ForkReplayResult } from './revmProof'
 import { summarizeExecutionObservations } from './executionObservations'
-import { currencyDeltaSlot, decodeCurrencyDeltas, deltasFullySettled } from './currencyDeltas'
+import { currencyDeltaSlot, decodeCurrencyDeltaTimelines, decodeCurrencyDeltas, deltasFullySettled } from './currencyDeltas'
 import { summarizeDynamicFees } from './poolEvents'
+import { observeHookCharge } from './hookCharge'
 import { scenarioRouterIdentity } from './protocolScenarioArtifact'
 import { buildProtocolScenarioContext, type ProtocolScenarioContext } from './protocolScenarioContext'
 import { buildProtocolScenarioMatrix, type ProtocolScenario } from './protocolNativeScenarios'
@@ -36,7 +37,7 @@ import { decodeProtocolRevert, summarizeProtocolSwapMovement, unresolvedProtocol
 // selector must first complete through the deployed PoolManager before a direct
 // rejection can count as bounded compatibility. Optional runtime probes also
 // share one per-pool time and hydration budget.
-export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.12.0'
+export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.13.0'
 
 /** EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks. */
 const SCENARIO_GAS_LIMIT = 16_000_000n
@@ -107,11 +108,28 @@ function evidenceFor(input: {
     accounts: [context.router, context.actor, context.poolManager, context.pool.hook],
     currencies: [context.pool.currency0, context.pool.currency1],
   })
+  const deltaTimelines = decodeCurrencyDeltaTimelines({
+    proof,
+    poolManager: context.poolManager,
+    accounts: [context.router, context.actor, context.poolManager, context.pool.hook],
+    currencies: [context.pool.currency0, context.pool.currency1],
+  })
+  const hookCharge = scenario.operation === 'swap'
+    ? observeHookCharge({
+        proof,
+        poolManager: context.poolManager,
+        poolId: context.pool.poolId,
+        hook: context.pool.hook,
+        currency0: context.pool.currency0,
+        currency1: context.pool.currency1,
+        poolFee: context.pool.fee,
+      })
+    : undefined
 
   return {
     id: `protocol-scenario:${context.pool.poolId.slice(2, 14)}:${scenario.id}`,
     detectorId: 'protocol-native-scenario',
-    detectorVersion: '0.4.0',
+    detectorVersion: '0.7.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: context.pool.hook,
@@ -141,7 +159,9 @@ function evidenceFor(input: {
       calls: proof.calls,
       observations,
       currencyDeltas: deltas,
+      currencyDeltaTimelines: deltaTimelines,
       deltasSettled: deltas.length ? deltasFullySettled(deltas) : undefined,
+      hookCharge,
       // Deliberately absent: no historical transaction hash. A generated
       // observation must never be mistaken for a reproduced onchain event.
     },

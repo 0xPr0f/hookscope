@@ -20,6 +20,8 @@ export const SCENARIO_STATUS_LABELS: Record<ScenarioConsoleStatus, string> = {
 
 export type ScenarioConsoleLine = {
   id: string
+  /** Pool this reported check belongs to. Absent only for suite-wide rows. */
+  poolId?: string
   section: string
   name: string
   status: ScenarioConsoleStatus
@@ -30,6 +32,8 @@ export type ScenarioConsoleLine = {
   detail?: string
   /** Raw EVM calls represented by this one reported scenario. */
   executions?: number
+  /** Stable identities used to avoid double-counting shared executions. */
+  executionIds?: string[]
 }
 
 export type ScenarioConsoleSuite = {
@@ -92,7 +96,10 @@ function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
     const observedOutcome = stringValue(item.observedOutcome)
     const movement = movementResult(item.swapMovement)
     const diagnostics = diagnosticSummaries(item.revertDiagnostics)
-    const executionCount = Array.isArray(item.scenarioIds) ? item.scenarioIds.length : 0
+    const scenarioIds = Array.isArray(item.scenarioIds)
+      ? item.scenarioIds.filter((scenarioId): scenarioId is string => typeof scenarioId === 'string')
+      : []
+    const executionCount = scenarioIds.length
     const isRuntimeProbe = Array.isArray(item.scenarioIds)
       && item.scenarioIds.some((scenarioId) => typeof scenarioId === 'string' && scenarioId.startsWith('runtime:'))
     const expectation = stringValue(item.expectation)
@@ -115,6 +122,7 @@ function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
     ].filter(Boolean).join(' ')
     return [{
       id: `${poolId}:${stringValue(item.id) ?? index}`,
+      poolId,
       section: `${stringValue(item.section)?.toUpperCase() ?? 'SCENARIO'} · POOL ${poolId.slice(0, 10)}`,
       name: normalizedTestName(upstream),
       status: status === 'passed' ? 'COMPATIBLE'
@@ -130,6 +138,7 @@ function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
       gasUsed: numberValue(item.gasUsed)?.toString(),
       detail: resultDetail,
       executions: executionCount || undefined,
+      executionIds: scenarioIds.map((scenarioId) => `${poolId.toLowerCase()}:${scenarioId}`),
     }]
   })
   const statusCount = (status: ScenarioConsoleStatus) => lines.filter((line) => line.status === status).length
@@ -229,12 +238,18 @@ function hackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
     const upstream = stringValue(finding.technical?.upstream) ?? finding.detectorId.replace('hacken-port-', '')
     return {
       id: finding.id,
+      poolId: finding.affectedPools[0],
       section: stringValue(finding.technical?.section)?.toUpperCase() ?? 'SCENARIO',
       name: normalizedTestName(upstream),
       status: statusFromHackenFinding(finding),
       description: finding.title.replace(/:\s*(passed|observed|failed)$/i, ''),
       gasUsed: gasFromStepOutcomes(finding),
       detail: 'Executed against the deterministic browser conformance fixture.',
+      executions: executionsFromStepOutcomes(finding),
+      executionIds: Array.from(
+        { length: executionsFromStepOutcomes(finding) },
+        (_, index) => `${finding.id}:execution:${index}`,
+      ),
     }
   })
   const ran = lines.length > 0
@@ -295,6 +310,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
     const receiptMatched = technical?.receiptMatched !== false
     return {
       id: finding.id,
+      poolId: finding.affectedPools[0],
       section: 'ORIGINAL TRANSACTION REPLAY',
       name: normalizedTestName(`replay_${kind}_${transactionHash?.slice(2, 10) ?? 'pinned'}`),
       status: receiptMatched ? 'PASS' : 'ERROR',
@@ -307,6 +323,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
         finding.claim,
       ].filter(Boolean).join(' · '),
       executions: 1,
+      executionIds: [`${finding.id}:execution:0`],
     }
   })
   const variantFindings = report.findings.filter((finding) => finding.detectorId === 'live-v4-router-variant')
@@ -321,6 +338,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
       ?? (stringValue(technical?.mutation) === 'repeated-sequence' ? 2 : 1)
     return {
       id: finding.id,
+      poolId: finding.affectedPools[0],
       section: 'ROUTER → POOLMANAGER SCENARIOS',
       name: normalizedTestName(scenarioId ?? label),
       status: 'OBSERVED',
@@ -331,6 +349,10 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
         executionCount > 1 ? `${executionCount} EVM executions; the final execution is reported` : undefined,
       ].filter(Boolean).join(' · '),
       executions: executionCount,
+      executionIds: Array.from(
+        { length: executionCount },
+        (_, index) => `${finding.id}:execution:${index}`,
+      ),
     }
   })
   const lines = [...replayLines, ...variantLines]
@@ -409,6 +431,7 @@ function generatedSuite(report: AnalysisReport): ScenarioConsoleSuite {
             : 'The scenario did not produce a PoolManager observation.')
     return [{
       id: `${poolId}:${scenarioId}:${index}`,
+      poolId,
       section: `${stringValue(outcome.operation)?.toUpperCase() ?? 'SCENARIO'} · POOL ${poolId.slice(0, 10)}`,
       name: normalizedTestName(scenarioId),
       status: zeroMovement ? 'NOOP'
@@ -420,6 +443,10 @@ function generatedSuite(report: AnalysisReport): ScenarioConsoleSuite {
         ?? `Exercise the generated ${stringValue(outcome.operation) ?? 'PoolManager'} scenario ${scenarioId}.`,
       gasUsed: numberValue(outcome.gasUsed)?.toString() ?? gasById.get(`${poolId}:${scenarioId}`),
       detail: resultDetail,
+      executions: status === 'completed' || status === 'reverted' ? 1 : undefined,
+      executionIds: status === 'completed' || status === 'reverted'
+        ? [`${poolId.toLowerCase()}:${scenarioId}`]
+        : undefined,
     }]
   })
   const ran = lines.length > 0
@@ -485,6 +512,7 @@ function erc20LaneSuite(report: AnalysisReport): ScenarioConsoleSuite {
     const scenarioId = stringValue(technical?.scenarioId) ?? 'lane'
     return {
       id: finding.id,
+      poolId: finding.affectedPools[0],
       section: `ERC-20 SETTLEMENT · ${stringValue(comparison?.reading)?.toUpperCase().replaceAll('-', ' ') ?? 'LANE'}`,
       name: normalizedTestName(scenarioId),
       status: roundTripCoverage ? 'COVERED'
@@ -504,6 +532,10 @@ function erc20LaneSuite(report: AnalysisReport): ScenarioConsoleSuite {
         shortfall && shortfall !== '0' ? `${shortfall} short of the requested amount` : undefined,
         stringValue(technical?.reason),
       ].filter(Boolean).join(' · ') || 'settled through the deployed token',
+      executions: !roundTripCoverage && (status === 'completed' || status === 'behavior-reverted') ? 1 : undefined,
+      executionIds: !roundTripCoverage && (status === 'completed' || status === 'behavior-reverted')
+        ? [`${finding.id}:execution:0`]
+        : undefined,
     }
   })
   const ran = lines.length > 0
@@ -544,9 +576,88 @@ export function buildScenarioConsoleSuites(report: AnalysisReport): ScenarioCons
   return fixtureConformance.ran ? [fixtureConformance] : publicSuites
 }
 
+function statusTotal(lines: readonly ScenarioConsoleLine[], ...statuses: ScenarioConsoleStatus[]) {
+  const accepted = new Set(statuses)
+  return lines.filter((line) => accepted.has(line.status)).length
+}
+
+/**
+ * Scopes the already-recorded transcript to one pool without inventing another
+ * execution. Counts and execution totals are recalculated from the visible
+ * report-backed rows; shared Hacken assertion evidence is deduplicated by its
+ * stable execution identity.
+ */
+export function filterScenarioConsoleSuites(
+  suites: readonly ScenarioConsoleSuite[],
+  selectedPoolId: string,
+): ScenarioConsoleSuite[] {
+  if (selectedPoolId === 'all') return [...suites]
+  const normalizedPoolId = selectedPoolId.toLowerCase()
+  return suites.map((suite) => {
+    const lines = suite.lines.filter((line) => line.poolId?.toLowerCase() === normalizedPoolId)
+    if (!lines.length) {
+      const reason = `This suite has no report-backed checks for pool ${selectedPoolId.slice(0, 10)}.`
+      return {
+        ...suite,
+        ran: false,
+        lines: [{
+          id: `${suite.id}:${selectedPoolId}:empty`,
+          poolId: selectedPoolId,
+          section: 'SELECTED POOL',
+          name: 'test_selected_pool()',
+          status: 'SKIP',
+          description: 'Show checks recorded for the selected pool only.',
+          detail: reason,
+        }],
+        passed: 0,
+        warned: 0,
+        failed: 0,
+        observed: 0,
+        covered: 0,
+        unavailable: 0,
+        errored: 0,
+        skipped: 1,
+        executions: 0,
+        elapsedMs: undefined,
+        reason,
+      }
+    }
+
+    const executionIds = new Set(lines.flatMap((line) => line.executionIds ?? []))
+    const executions = executionIds.size || lines.reduce((total, line) => total + (line.executions ?? 0), 0)
+    return {
+      ...suite,
+      ran: true,
+      lines,
+      passed: suite.id === 'hacken-public'
+        ? statusTotal(lines, 'COMPATIBLE')
+        : statusTotal(lines, 'PASS'),
+      warned: suite.id === 'hacken-public' ? statusTotal(lines, 'WARN') : suite.warned,
+      failed: suite.id === 'hacken-public'
+        ? statusTotal(lines, 'CONTRADICTED')
+        : suite.id === 'hacken-port'
+          ? statusTotal(lines, 'FAIL')
+          : 0,
+      observed: suite.id === 'hacken-public'
+        ? statusTotal(lines, 'OBSERVED', 'REVERT', 'NOOP')
+        : suite.id === 'generated-protocol'
+          ? statusTotal(lines, 'REVERT', 'NOOP')
+          : suite.id === 'erc20-lane'
+            ? statusTotal(lines, 'REVERT')
+            : statusTotal(lines, 'OBSERVED'),
+      covered: statusTotal(lines, 'COVERED'),
+      unavailable: statusTotal(lines, 'UNAVAILABLE'),
+      errored: statusTotal(lines, 'ERROR'),
+      skipped: statusTotal(lines, 'SKIP'),
+      executions,
+      reason: undefined,
+    }
+  })
+}
+
 /** Number shown on the Tests tab: every report-backed check, including unavailable checks, but never a synthetic skip row. */
-export function scenarioConsoleCheckCount(report: AnalysisReport) {
-  return buildScenarioConsoleSuites(report)
+export function scenarioConsoleCheckCount(report: AnalysisReport, selectedPoolId = 'all') {
+  return filterScenarioConsoleSuites(buildScenarioConsoleSuites(report), selectedPoolId)
     .reduce((total, suite) => total + suite.lines.filter((line) => line.status !== 'SKIP').length, 0)
 }
 
