@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import type { Address, Hex } from 'viem'
 
-export const severitySchema = z.enum(['critical', 'high', 'medium', 'low', 'info'])
-export const evidenceClassSchema = z.enum([
+const severitySchema = z.enum(['critical', 'high', 'medium', 'low', 'info'])
+const evidenceClassSchema = z.enum([
   'deterministic-fact',
   'static-reachability',
   'concrete-observation',
@@ -13,7 +13,7 @@ export const evidenceClassSchema = z.enum([
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/)
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
 
-export const replayWitnessSchema = z.object({
+const replayWitnessSchema = z.object({
   from: addressSchema,
   to: addressSchema,
   input: hexSchema,
@@ -23,7 +23,7 @@ export const replayWitnessSchema = z.object({
   stateOverrides: z.record(z.string(), z.unknown()).optional(),
 })
 
-export const evidenceSchema = z.object({
+const evidenceSchema = z.object({
   id: z.string().min(1).max(160),
   detectorId: z.string().min(1).max(100),
   detectorVersion: z.string().min(1).max(32),
@@ -51,22 +51,22 @@ export const evidenceSchema = z.object({
   technical: z.record(z.string(), z.unknown()).optional(),
 })
 
-export const capabilityStateSchema = z.object({
+const capabilityStateSchema = z.object({
   supported: z.boolean(),
   status: z.enum(['passed', 'degraded', 'unsupported']),
   reason: z.string().max(500).optional(),
   verifiedAt: z.string().datetime().optional(),
 })
 
-export const poolReplayKindSchema = z.enum(['initialize', 'swap', 'modify-liquidity', 'donate'])
+const poolReplayKindSchema = z.enum(['initialize', 'swap', 'modify-liquidity', 'donate'])
 
-export const poolReplayReferenceSchema = z.object({
+const poolReplayReferenceSchema = z.object({
   kind: poolReplayKindSchema,
   transactionHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
   blockNumber: z.string(),
 })
 
-export const poolSchema = z.object({
+const poolSchema = z.object({
   poolId: hexSchema,
   currency0: addressSchema,
   currency1: addressSchema,
@@ -80,7 +80,7 @@ export const poolSchema = z.object({
   activity: z.number().nonnegative().default(0),
 })
 
-export const sourceMetadataSchema = z.object({
+const sourceMetadataSchema = z.object({
   provider: z.literal('sourcify'),
   match: z.string().max(64),
   runtimeCodeHash: hexSchema,
@@ -94,7 +94,7 @@ export const sourceMetadataSchema = z.object({
   eventSignatures: z.array(z.string().max(512)).max(1_024).default([]),
 })
 
-export const contractNodeSchema = z.object({
+const contractNodeSchema = z.object({
   address: addressSchema,
   role: z.enum(['token', 'hook', 'implementation', 'admin', 'dependency', 'pool-manager']),
   codeHash: hexSchema,
@@ -105,7 +105,7 @@ export const contractNodeSchema = z.object({
   sourceMetadata: sourceMetadataSchema.optional(),
 })
 
-export const phaseSchema = z.object({
+const phaseSchema = z.object({
   id: z.enum(['pin', 'discover', 'resolve', 'static', 'replay', 'generated', 'scenarios', 'fuzz', 'report']),
   label: z.string(),
   status: z.enum(['pending', 'running', 'completed', 'degraded', 'cancelled', 'failed']),
@@ -230,6 +230,8 @@ export type StaticAnalysisResult = {
   paths: number
   branches: number
   engineAvailability: Record<string, { available: boolean; detail?: string }>
+  /** Reachability caveats, e.g. computed jumps whose destinations are unknown. */
+  limitations?: string[]
 }
 
 export type WorkerCommand =

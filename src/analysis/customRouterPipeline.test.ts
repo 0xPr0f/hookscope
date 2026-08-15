@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { toEventSelector, type Address, type Hex } from 'viem'
+import { toEventSelector, type Address, type Hex, type PublicClient } from 'viem'
 import {
   CUSTOM_ROUTER_POOL_MANAGER,
   CUSTOM_ROUTER_SAMPLES,
@@ -7,7 +7,7 @@ import {
   customRouterRuntime,
 } from '../fixtures/customRouter9409'
 import { prepareHistoricalRouterContexts } from '../data/historicalRouterContext'
-import { customRouterScenarios } from './liveRouterScenarios'
+import { customRouterScenarios, runLiveRouterScenarios } from './liveRouterScenarios'
 import { selectForkExplorationTargets, exchangeCorpus } from './liveForkExploration'
 import { decodeCustomV4UnlockCalldata, AMOUNT_LOW_OFFSET, AMOUNT_WORD_END } from '../adapters/customV4UnlockRouterCodec'
 import type { LivePoolReplayCoverage } from './livePoolReplay'
@@ -143,6 +143,45 @@ describe('recognized custom router end to end', () => {
     // Without the recognition step this router is exact-replay-only, exactly as
     // it was before this adapter existed.
     expect(selectForkExplorationTargets({ pools: [pool], replay })).toHaveLength(0)
+  })
+
+  it('counts an attested custom template as a controllable live scenario context', async () => {
+    const recognized = await contexts()
+    const replayResult = replay.outcomes[0]!.replay!
+    const execute = vi.fn(async () => replayResult)
+    const coverage = await runLiveRouterScenarios({
+      scanId: 'custom-router-live-scenarios',
+      client: {} as PublicClient,
+      poolManager: CUSTOM_ROUTER_POOL_MANAGER,
+      pools: [pool],
+      replay,
+      routerContexts: recognized,
+      signal: new AbortController().signal,
+      createSession: () => ({
+        prefetch: vi.fn(async () => ({
+          hydratedAccounts: 0,
+          hydratedStorageSlots: 0,
+          hydratedBlockHashes: 0,
+          rpcReads: 0,
+          executions: 0,
+        })),
+        execute,
+        metrics: () => ({
+          hydratedAccounts: 0,
+          hydratedStorageSlots: 0,
+          hydratedBlockHashes: 0,
+          rpcReads: 0,
+          executions: execute.mock.calls.length,
+        }),
+        close: vi.fn(),
+      }),
+    })
+
+    expect(coverage.status).toBe('passed')
+    expect(coverage.recognizedPools).toBe(1)
+    expect(coverage.scenarios).toBe(4)
+    expect(coverage.limitations.join(' ')).not.toContain('no receipt-matched controllable router context')
+    expect(execute).toHaveBeenCalledTimes(5)
   })
 
   it('drops corpus candidates that escaped the amount mask', async () => {

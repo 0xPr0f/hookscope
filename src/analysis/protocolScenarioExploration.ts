@@ -6,6 +6,7 @@ import {
   witnessOutcomeIdentity,
   type ForkExplorationMetrics,
   type ForkHydrationRequest,
+  type ForkReplayTransaction,
   type RevmExplorationWitness,
 } from './revmProof'
 import { scenarioRouterIdentity } from './protocolScenarioArtifact'
@@ -35,7 +36,7 @@ import {
 // 0.3.0: warm-up and explored transactions now pay the pinned execution
 // block's base fee, so validation reaches the generated harness on London and
 // later blocks instead of failing transaction validation first.
-export const PROTOCOL_EXPLORATION_STRATEGY = 'libafl-masked-generated-scenario-rounds/0.3.0'
+export const PROTOCOL_EXPLORATION_STRATEGY = 'libafl-masked-generated-scenario-rounds/0.5.0'
 
 /** The revm Wasm bridge rejects a mask wider than its own input ceiling. */
 const MAX_MUTABLE_BYTES = 512
@@ -202,6 +203,7 @@ function evidenceFor(input: {
     technical: {
       executionSource: 'protocol-native-generated',
       stateMode: 'pinned-block-with-declared-overrides',
+      executionMode: 'simulation',
       strategy: PROTOCOL_EXPLORATION_STRATEGY,
       harness: scenarioRouterIdentity(context.overlay.patched),
       shapes: outcome.shapes,
@@ -243,13 +245,14 @@ async function explorePool(input: {
   const rejectedSeeds: { scenarioId: string; reason: string }[] = []
   let seedReverted = false
 
-  const transactionFor = (scenario: ProtocolScenario) => ({
+  const transactionFor = (scenario: ProtocolScenario): ForkReplayTransaction => ({
     caller: scenario.caller === 'actor' ? context.actor : context.alternateActor,
     to: scenario.via === 'router' ? context.router : context.alternateRouter,
     calldata: scenario.calldata,
     value: 0n,
+    executionMode: 'simulation',
     gasLimit: SCENARIO_GAS_LIMIT,
-    gasPrice: context.executionBlock.baseFee,
+    gasPrice: 0n,
     nonce: 0,
     chainId: context.chainId,
     traceLimit: 2_048,

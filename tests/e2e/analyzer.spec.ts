@@ -1,12 +1,20 @@
 import { expect, test } from '@playwright/test'
 
+const malformedAddress = `0x${'a'.repeat(41)}`
+
 test('runs the deterministic browser engines and records bounded outcomes', async ({ page }) => {
+  // The three browser projects run their 30k-input workers concurrently in CI;
+  // slower shared runners can legitimately take longer than one worker's
+  // internal 30-second exploration budget to render the completed report.
+  test.setTimeout(90_000)
   await page.goto('/')
   await page.getByRole('button', { name: 'Load deterministic example' }).click()
   await page.getByRole('button', { name: 'Analyze token' }).click()
 
-  await expect(page.getByText('Completed browser report')).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByText('80 real PoolManager executions', { exact: false })).toBeVisible()
+  await expect(page.getByText('Completed browser report')).toBeVisible({ timeout: 60_000 })
+  await expect(
+    page.getByLabel('Analysis phase coverage').getByText('80 real PoolManager executions', { exact: false }),
+  ).toBeVisible()
   await expect(page.getByRole('heading', { name: /\d+ of 5 passed/ })).toBeVisible()
   await expect(page.getByText(/deterministic pools/)).toBeVisible()
 
@@ -17,21 +25,32 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   await expect(page.getByText('HookAuthorization.run_Auth_OnlyPoolManager_OnEntrypoints', { exact: false })).toBeVisible()
   await expect(page.getByText('HookConfiguration.run_PermissionsMatchAddressFlags_ifExposed', { exact: false })).toBeVisible()
   await page.getByRole('button').filter({ hasText: 'Inputs produce different state outcomes' }).click()
+  await page.getByText('Raw technical record', { exact: true }).click()
   await expect(page.getByText(/libafl-worker-fanout-corpus-exchange\/0.2.0/)).toBeVisible()
 
-  // The three PoolManager suites must stay visibly separate, each reporting its
-  // own result, so a skipped suite can never read as another suite's outcome.
+  // Fixture conformance and public-pool suites are different products. The
+  // deterministic report must show only its assertion oracle, never public
+  // suites that did not run.
   await page.getByRole('tab', { name: /Tests/ }).click()
-  for (const suite of ['HackenBrowserPort', 'GeneratedPoolManagerScenarios', 'LivePoolManagerScenarios']) {
-    await expect(page.getByRole('heading', { name: suite, exact: true })).toBeVisible()
+  await expect(page.getByText('How to read these suites')).toBeVisible()
+  await expect(page.getByText('Runs the complete 40-case port against deterministic expected outcomes.', { exact: false })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'HackenPortFixtureConformance', exact: true })).toBeVisible()
+  for (const suite of ['HackenPublicPoolAssertions', 'GeneratedPoolManagerScenarios', 'Erc20SettlementLane', 'LivePoolManagerScenarios']) {
+    await expect(page.getByRole('heading', { name: suite, exact: true })).toHaveCount(0)
   }
-  await expect(page.getByLabel('GeneratedPoolManagerScenarios scenario output')).toContainText('SKIP')
-  await expect(page.getByLabel('HackenBrowserPort scenario output')).toContainText('Suite result: OK')
+  const transcript = page.getByLabel('HackenPortFixtureConformance scenario output')
+  await expect(transcript).toContainText('Suite result: OK')
+  await expect(transcript).toContainText('Tiny exact-input swap')
+  await expect(transcript).toContainText('Executed against the deterministic browser conformance fixture')
+
+  // Dense test rows must reflow instead of widening the document on phones.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('rejects the supplied malformed address before starting workers', async ({ page }) => {
+test('rejects a malformed address before starting workers', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('textbox', { name: 'Token address' }).fill('0xD0a606aDf58b69a28D479aAA510CE6FE96E0a1eb2')
+  await page.getByRole('textbox', { name: 'Token address' }).fill(malformedAddress)
   await page.getByRole('button', { name: 'Analyze token' }).click()
 
   await expect(page.getByRole('alert')).toHaveText('Enter a valid 20-byte EVM address.')

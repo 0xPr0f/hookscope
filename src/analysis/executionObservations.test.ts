@@ -43,6 +43,21 @@ describe('execution observation summary', () => {
     expect(observations.transientReads).toEqual([{ address: HOOK, slot: '0x02' }])
   })
 
+  it('attributes delegated storage operations to the storage context, not the implementation', () => {
+    const observations = summarizeExecutionObservations(proof({
+      storageOperations: [{
+        frameId: 2,
+        address: TOKEN,
+        storageAddress: HOOK,
+        pc: 4,
+        opcode: 'TSTORE',
+        slot: '0x03',
+        value: '0x08',
+      }],
+    }))
+    expect(observations.transientWrites).toEqual([{ address: HOOK, slot: '0x03', value: '0x08' }])
+  })
+
   it('reports distinct event signatures and external selectors in first-seen order', () => {
     const observations = summarizeExecutionObservations(proof({
       logs: [

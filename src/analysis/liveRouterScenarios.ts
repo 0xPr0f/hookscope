@@ -408,6 +408,10 @@ function evidence(
     } : undefined,
     reproducibility: 'replayed',
     technical: {
+      scenarioId: result.scenario.id,
+      scenarioDescription: result.scenario.description,
+      executionCount: repeatedEnvelope ? 2 : 1,
+      ...(repeatedEnvelope ? { sequenceFirstSucceeded: result.sequenceFirstSucceeded } : undefined),
       operationKind: result.scenario.operationKind,
       mutation: result.scenario.mutation,
       historicalTransaction: outcome.transactionHash,
@@ -673,7 +677,18 @@ export async function runLiveRouterScenarios(input: {
           if (input.signal.aborted) throw new DOMException('Live router scenarios cancelled', 'AbortError')
           input.onProgress?.(completed, contexts.length, `${scenario.operationKind} · ${scenario.mutation}`)
           const replay = await session.execute({
-            transaction: { ...candidate.transaction, calldata: scenario.calldata, traceLimit: 2_048 },
+            // Controlled variants are unsigned simulations, not reproductions of
+            // the historical transaction. Relax nonce/base-fee validation and do
+            // not charge the historical actor gas; otherwise a committed sequence
+            // makes its second call fail on the first call's nonce increment.
+            transaction: {
+              ...candidate.transaction,
+              calldata: scenario.calldata,
+              executionMode: 'simulation',
+              gasPrice: 0n,
+              maxPriorityFeePerGas: undefined,
+              traceLimit: 2_048,
+            },
             block: candidate.block,
             signal: input.signal,
             timeoutMs: input.timeoutMs ?? 15_000,
@@ -687,7 +702,13 @@ export async function runLiveRouterScenarios(input: {
         // permission behaves differently on the second execution, and nothing
         // that only ever runs a single transaction can observe that.
         if (!input.signal.aborted) {
-          const sequenced = { ...candidate.transaction, traceLimit: 2_048 }
+          const sequenced = {
+            ...candidate.transaction,
+            executionMode: 'simulation' as const,
+            gasPrice: 0n,
+            maxPriorityFeePerGas: undefined,
+            traceLimit: 2_048,
+          }
           const execute = (commit: boolean) => session.execute({
             transaction: sequenced,
             block: candidate.block,
@@ -751,11 +772,14 @@ export async function runLiveRouterScenarios(input: {
   const concurrency = Math.max(1, Math.min(input.maxWorkers ?? 2, contexts.length || 1))
   await Promise.all(Array.from({ length: concurrency }, () => worker()))
   const completedOutcomes = outcomes.filter((outcome) => outcome.status === 'completed')
-  const canonicalContexts = contexts.filter((context) => context.canonicalEnvelope).length
-  const unrecognized = Math.max(0, eligiblePools - canonicalContexts)
+  // Both official envelopes and attested custom templates are controllable. The
+  // latter deliberately have `canonicalEnvelope: false`, so counting only that
+  // flag would describe a successfully recognized custom router as unsupported.
+  const controllableContexts = contexts.filter((context) => context.scenarios.length > 0).length
+  const unrecognized = Math.max(0, eligiblePools - controllableContexts)
   const failed = outcomes.filter((outcome) => outcome.status === 'failed')
   const limitations = [
-    unrecognized ? `${unrecognized} hooked pool${unrecognized === 1 ? ' has' : 's have'} no receipt-matched supported Universal Router or PositionManager envelope for controlled mutation. Its exact historical custom-router execution is still reported when the receipt-matched trace reaches both PoolManager and the selected hook.` : undefined,
+    unrecognized ? `${unrecognized} hooked pool${unrecognized === 1 ? ' has' : 's have'} no receipt-matched controllable router context. Official Uniswap envelopes and attested custom templates are supported; an unrecognized envelope keeps only its exact historical custom-router execution when the trace reaches both PoolManager and the selected hook.` : undefined,
     failed.length ? `${failed.length} recognized router context${failed.length === 1 ? ' did' : 's did'} not complete its bounded variants.` : undefined,
     positionLookups.unavailable ? `${positionLookups.unavailable} pinned PositionManager token lookup${positionLookups.unavailable === 1 ? ' was' : 's were'} unavailable, so those liquidity actions were not attributed to a pool.` : undefined,
     positionLookups.nestedSkipped ? `${positionLookups.nestedSkipped} token-ID-only action${positionLookups.nestedSkipped === 1 ? ' was' : 's were'} nested under Universal Router and stayed unattributed because the replay trace did not identify exactly one forwarded PositionManager call.` : undefined,
@@ -765,9 +789,9 @@ export async function runLiveRouterScenarios(input: {
     signedPayloadLimitation(signedPayloads),
   ].filter((value): value is string => Boolean(value))
   return {
-    status: eligiblePools > 0 && canonicalContexts === eligiblePools && completedOutcomes.length === eligiblePools && failed.length === 0 ? 'passed' : 'degraded',
+    status: eligiblePools > 0 && controllableContexts === eligiblePools && completedOutcomes.length === eligiblePools && failed.length === 0 ? 'passed' : 'degraded',
     eligiblePools,
-    recognizedPools: canonicalContexts,
+    recognizedPools: controllableContexts,
     scenarios: completedOutcomes.reduce((sum, outcome) => sum + outcome.results.length, 0),
     executions: outcomes.reduce((sum, outcome) => sum + outcome.results.length, 0),
     hydrationReads: outcomes.reduce((sum, outcome) => sum + (outcome.metrics?.rpcReads ?? 0), 0),

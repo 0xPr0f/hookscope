@@ -41,9 +41,32 @@ function upstreamIntegrity() {
   return { pin }
 }
 
-const ARTIFACT = 'out/ProtocolScenarioRouter.sol/ProtocolScenarioRouter.json'
-const SOURCE = 'contracts/fixtures/ProtocolScenarioRouter.sol'
-const OUTPUT = 'src/fixtures/generated/protocol-scenario-router.json'
+/**
+ * Both settlement lanes are emitted from one place.
+ *
+ * The claims lane is the pool/hook mechanics baseline; the ERC-20 lane executes
+ * the token's own transfer code. They share a compiler build, an immutable
+ * layout and a PoolManager storage manifest, so publishing them together keeps
+ * a browser from ever injecting one lane built against a different pin.
+ */
+const HARNESSES = [
+  {
+    contract: 'ProtocolScenarioRouter',
+    artifact: 'out/ProtocolScenarioRouter.sol/ProtocolScenarioRouter.json',
+    source: 'contracts/fixtures/ProtocolScenarioRouter.sol',
+    output: 'src/fixtures/generated/protocol-scenario-router.json',
+    settlement: 'erc6909-claims',
+    description: 'Pinned, reviewed Uniswap-derived scenario harness. Not audited and not a production router.',
+  },
+  {
+    contract: 'ProtocolERC20ScenarioRouter',
+    artifact: 'out/ProtocolERC20ScenarioRouter.sol/ProtocolERC20ScenarioRouter.json',
+    source: 'contracts/fixtures/ProtocolERC20ScenarioRouter.sol',
+    output: 'src/fixtures/generated/protocol-erc20-scenario-router.json',
+    settlement: 'erc20-transfers',
+    description: 'Pinned, reviewed Uniswap-derived ERC-20 settlement harness. Not audited and not a production router.',
+  },
+]
 
 /** The harness stores PoolManager as a single immutable; more than one id means the layout changed. */
 function immutablePositions(deployedBytecode) {
@@ -86,9 +109,9 @@ function poolManagerClaimSlot() {
   return { slot: Number(entry.slot), type, layoutHash: keccakLike(JSON.stringify(layout)) }
 }
 
-function main() {
-  const artifact = JSON.parse(read(ARTIFACT))
-  const source = read(SOURCE)
+function emit(harness, storage) {
+  const artifact = JSON.parse(read(harness.artifact))
+  const source = read(harness.source)
   const runtime = artifact.deployedBytecode.object
   if (!runtime?.startsWith('0x')) throw new Error('Artifact has no deployed bytecode.')
 
@@ -106,8 +129,9 @@ function main() {
 
   const manifest = {
     schemaVersion: '1',
-    contract: 'ProtocolScenarioRouter',
-    description: 'Pinned, reviewed Uniswap-derived scenario harness. Not audited and not a production router.',
+    contract: harness.contract,
+    settlement: harness.settlement,
+    description: harness.description,
     runtimeBytecode: runtime,
     runtimeBytes: body.length / 2,
     // Hash of the unpatched template. The per-chain hash is derived after
@@ -129,14 +153,14 @@ function main() {
       coreIntegrity: upstreamIntegrity().pin('@uniswap/v4-core', core.version),
       peripheryIntegrity: upstreamIntegrity().pin('@uniswap/v4-periphery', periphery.version),
     },
-    poolManagerStorage: poolManagerClaimSlot(),
+    poolManagerStorage: storage,
     selectors: artifact.methodIdentifiers,
     generatedAt: new Date().toISOString().slice(0, 10),
   }
 
   // Regenerating an unchanged harness must produce a byte-identical file, so CI
   // can assert the checked-in manifest against a fresh build with a plain diff.
-  const outputPath = fileURLToPath(new URL(OUTPUT, root))
+  const outputPath = fileURLToPath(new URL(harness.output, root))
   if (existsSync(outputPath)) {
     const previous = JSON.parse(readFileSync(outputPath, 'utf8'))
     if (JSON.stringify({ ...previous, generatedAt: null }) === JSON.stringify({ ...manifest, generatedAt: null })) {
@@ -147,12 +171,19 @@ function main() {
   mkdirSync(fileURLToPath(new URL('src/fixtures/generated/', root)), { recursive: true })
   writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`)
   console.log(
-    `Wrote ${OUTPUT}: ${manifest.runtimeBytes} runtime bytes, `
+    `Wrote ${harness.output}: ${manifest.runtimeBytes} runtime bytes, `
     + `${positions.length} immutable position(s), solc ${manifest.compiler.solc}, `
     + `v4-core ${manifest.uniswap.core}, v4-periphery ${manifest.uniswap.periphery}, `
     + `balanceOf slot ${manifest.poolManagerStorage.slot}, `
     + `layout ${manifest.poolManagerStorage.layoutHash}.`,
   )
+}
+
+function main() {
+  // Derived once and shared: both lanes must agree on the PoolManager layout
+  // they were built against, and re-deriving it per harness invites drift.
+  const storage = poolManagerClaimSlot()
+  for (const harness of HARNESSES) emit(harness, storage)
 }
 
 main()

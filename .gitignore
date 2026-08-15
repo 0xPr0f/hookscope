@@ -9,3 +9,5 @@ crates/revm-wasm/target/
 playwright-report/
 test-results/
 out/
+cache/
+/docs/

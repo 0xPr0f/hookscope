@@ -43,13 +43,14 @@ export function summarizeExecutionObservations(proof: RevmExecutionProof): Execu
   const transientReads: ExecutionObservations['transientReads'] = []
   let persistentWrites = 0
   for (const access of proof.storageOperations) {
+    const storageAddress = access.storageAddress ?? access.address
     if (access.opcode === PERSISTENT_WRITE) persistentWrites += 1
     if (access.slot === undefined) continue
     if (access.opcode === TRANSIENT_WRITE && access.value !== undefined) {
-      transientWrites.push({ address: access.address, slot: access.slot, value: access.value })
+      transientWrites.push({ address: storageAddress, slot: access.slot, value: access.value })
     }
     if (access.opcode === TRANSIENT_READ) {
-      transientReads.push({ address: access.address, slot: access.slot })
+      transientReads.push({ address: storageAddress, slot: access.slot })
     }
   }
 

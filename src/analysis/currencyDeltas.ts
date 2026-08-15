@@ -52,7 +52,7 @@ export function decodeCurrencyDeltas(input: {
       access.opcode === 'TSTORE'
       && access.slot !== undefined
       && access.value !== undefined
-      && access.address.toLowerCase() === manager,
+      && (access.storageAddress ?? access.address).toLowerCase() === manager,
   )
   if (!writes.length) return []
 

@@ -1,4 +1,4 @@
-import { getAddress, keccak256, type Address, type Hex } from 'viem'
+import { bytesToHex, getAddress, hexToBytes, keccak256, type Address, type Hex } from 'viem'
 
 /**
  * Runtime-template recognition for the custom v4 unlock router family.
@@ -45,7 +45,7 @@ export type CustomRouterRuntimeResult =
   | { ok: false; reason: CustomRouterRuntimeRejection; detail: string }
 
 function embeddedAddress(bytes: Uint8Array, start: number): string {
-  return Buffer.from(bytes.subarray(start, start + ADDRESS_BYTES)).toString('hex')
+  return bytesToHex(bytes.subarray(start, start + ADDRESS_BYTES)).slice(2)
 }
 
 /**
@@ -56,7 +56,7 @@ function embeddedAddress(bytes: Uint8Array, start: number): string {
  * report needs it to name what the recognized deployment points at.
  */
 export function normalizeCustomRouterRuntime(bytecode: Hex): CustomRouterRuntimeResult {
-  const bytes = Uint8Array.from(Buffer.from(bytecode.replace(/^0x/, ''), 'hex'))
+  const bytes = hexToBytes(bytecode)
   if (bytes.length !== CUSTOM_ROUTER_RUNTIME_BYTES) {
     return {
       ok: false,
@@ -79,7 +79,7 @@ export function normalizeCustomRouterRuntime(bytecode: Hex): CustomRouterRuntime
 
   const masked = new Uint8Array(bytes)
   for (const start of CUSTOM_ROUTER_ADDRESS_RANGES) masked.fill(0, start, start + ADDRESS_BYTES)
-  const normalizedBytecode = `0x${Buffer.from(masked).toString('hex')}` as Hex
+  const normalizedBytecode = bytesToHex(masked)
 
   return {
     ok: true,

@@ -99,19 +99,27 @@ describe('generated scenario matrix', () => {
     expect(scenario.commits).toBe(true)
   })
 
-  it('exercises hook data shapes and an alternate sender', () => {
+  it('exercises hook data shapes and the four-way caller probe', () => {
     const { scenarios } = buildProtocolScenarioMatrix({ key, currentTick: 0, actor: ACTOR })
-    expect(scenarios.find((s) => s.id === 'swap:hook-data:empty')!.steps[0]!.hookData).toBe('0x')
-    expect(scenarios.find((s) => s.id === 'swap:hook-data:marker')!.steps[0]!.hookData).toBe('0x686f6f6b73636f7065')
+    expect(scenarios.find((s) => s.id === 'swap:hook-data:marker')!.steps[0]!.hookData)
+      .toBe('0x686f6f6b73636f7065')
+    expect(scenarios.find((s) => s.id === 'swap:hook-data:raw-four-byte')!.steps[0]!.hookData)
+      .toBe('0xdeadbeef')
     expect(scenarios.find((s) => s.id === 'swap:hook-data:abi-actor')!.steps[0]!.hookData)
       .toContain(ACTOR.slice(2).toLowerCase())
-    // The alternate-sender scenario must change the contract that calls the
-    // PoolManager, not merely the transaction caller: a hook's `sender` is
-    // whoever called the PoolManager, which is always a harness instance.
-    const alternate = scenarios.find((s) => s.id === 'swap:alternate-sender')!
-    expect(alternate.caller).toBe('alternateActor')
-    expect(alternate.via).toBe('alternateRouter')
-    expect(scenarios.filter((s) => s.via === 'router').length).toBe(scenarios.length - 1)
+
+    // A hook's `sender` is whoever called the PoolManager, which is always a
+    // harness instance, so varying the transaction caller alone cannot change
+    // it. The probe therefore varies each independently across four corners.
+    const probes = scenarios.filter((s) => s.id.startsWith('caller-probe:'))
+    expect(probes.map((s) => s.id)).toEqual([
+      'caller-probe:baseline', 'caller-probe:tx-caller', 'caller-probe:hook-sender', 'caller-probe:both',
+    ])
+    expect(probes.map((s) => `${s.caller}/${s.via}`)).toEqual([
+      'actor/router', 'alternateActor/router', 'actor/alternateRouter', 'alternateActor/alternateRouter',
+    ])
+    // Only the two corners that route elsewhere use the alternate instance.
+    expect(scenarios.filter((s) => s.via === 'alternateRouter')).toHaveLength(2)
   })
 
   it('generates donations for each currency shape', () => {
@@ -120,5 +128,15 @@ describe('generated scenario matrix', () => {
     expect(donations.map((s) => s.id).sort()).toEqual([
       'donate:both', 'donate:currency0', 'donate:currency1', 'donate:minimal',
     ])
+    expect(scenarios.find((s) => s.id === 'sequence:three-donations')!.steps).toHaveLength(3)
+  })
+
+  it('provides the public Hacken adaptation with bounded liquidity and sequence seeds', () => {
+    const { scenarios } = buildProtocolScenarioMatrix({ key, currentTick: 0, actor: ACTOR })
+    expect(scenarios.find((s) => s.id === 'sequence:alternating-swaps')!.steps.map((step) => step.zeroForOne))
+      .toEqual([true, false, true])
+    expect(scenarios.find((s) => s.id === 'sequence:three-liquidity-adds')!.steps).toHaveLength(3)
+    expect(scenarios.filter((s) => s.id.startsWith('liquidity:add:amount-'))).toHaveLength(3)
+    expect(scenarios.filter((s) => s.id.startsWith('liquidity:add:range-'))).toHaveLength(3)
   })
 })

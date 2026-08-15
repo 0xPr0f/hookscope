@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { InvalidTokenAddressError, parseTokenAddress } from './address'
 
+const malformedAddress = `0x${'a'.repeat(41)}`
+
 describe('parseTokenAddress', () => {
   it('normalizes a valid address', () => {
     expect(parseTokenAddress('0x000000000000000000000000000000000000dead')).toBe(
@@ -8,9 +10,7 @@ describe('parseTokenAddress', () => {
     )
   })
 
-  it('rejects the supplied 41-hex-digit address before any RPC work', () => {
-    expect(() => parseTokenAddress('0xD0a606aDf58b69a28D479aAA510CE6FE96E0a1eb2')).toThrow(
-      InvalidTokenAddressError,
-    )
+  it('rejects a 41-hex-digit address before any RPC work', () => {
+    expect(() => parseTokenAddress(malformedAddress)).toThrow(InvalidTokenAddressError)
   })
 })

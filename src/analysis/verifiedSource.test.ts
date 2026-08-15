@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { keccak256, type Address } from 'viem'
+import { keccak256, type Address, type Hex } from 'viem'
 import type { SourcifyCompilationBundle } from '../data/source'
 import { buildAstCompilerInput, sourceSummaryEvidence } from './verifiedSource'
 
@@ -56,5 +56,57 @@ describe('verified-source compiler pass', () => {
     ])
     expect(findings.every((finding) => finding.severity === 'info')).toBe(true)
     expect(findings.at(-1)?.claim).toContain('not a whole-program proof')
+  })
+})
+
+describe('source dependency findings', () => {
+  const base = { subject: SUBJECT, affectedPools: [] as Hex[] }
+  const summary = {
+    fullyQualifiedName: 'src/Hook.sol:Hook',
+    compilerVersion: '0.8.26+commit.8a97fa7a',
+    astNodeCount: 100,
+    functions: [], externalCalls: [], stateWrites: [], senderGates: [],
+    abi: [], storageLayout: { storage: [], types: {} }, methodIdentifiers: {},
+  }
+
+  it('raises severity only when a caller-derived value reaches a decisive sink', () => {
+    const decisive = sourceSummaryEvidence({
+      ...base,
+      summary: {
+        ...summary,
+        dependencies: [{ sink: 'condition' as const, sources: ['msg.sender'], function: 'f' }],
+      },
+    }).find((finding) => finding.detectorId === 'verified-source-dependency')!
+    expect(decisive.severity).toBe('medium')
+    expect(decisive.title).toContain('Caller-derived')
+
+    const benign = sourceSummaryEvidence({
+      ...base,
+      summary: {
+        ...summary,
+        // A parameter reaching a return value is real but not decisive.
+        dependencies: [{ sink: 'return-value' as const, sources: ['parameter'], function: 'f' }],
+      },
+    }).find((finding) => finding.detectorId === 'verified-source-dependency')!
+    expect(benign.severity).toBe('info')
+    expect(benign.title).not.toContain('Caller-derived')
+  })
+
+  it('states its own scope so a miss is not read as absence', () => {
+    const finding = sourceSummaryEvidence({
+      ...base,
+      summary: { ...summary, dependencies: [{ sink: 'state-assignment' as const, sources: ['msg.sender'] }] },
+    }).find((item) => item.detectorId === 'verified-source-dependency')!
+    expect(finding.claim).toContain('does not cross function boundaries')
+    expect(finding.claim).toContain('not evidence of absence')
+    expect(finding.technical!.scope).toBe('intraprocedural')
+  })
+
+  it('drops an internal analysis failure instead of reporting it as a dependency', () => {
+    const findings = sourceSummaryEvidence({
+      ...base,
+      summary: { ...summary, dependencies: [{ sink: 'analysis-failed' as const, sources: [], detail: 'boom' }] },
+    })
+    expect(findings.some((finding) => finding.detectorId === 'verified-source-dependency')).toBe(false)
   })
 })

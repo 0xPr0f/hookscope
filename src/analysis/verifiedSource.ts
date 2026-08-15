@@ -22,6 +22,30 @@ export type SourceCallFact = {
 export type SourceWriteFact = { variable: string; function?: string; sourcePath: string; src?: string }
 export type SourceGateFact = { kind: 'require' | 'assert' | 'if'; function?: string; sourcePath: string; src?: string }
 
+/**
+ * An intraprocedural source-to-sink dependency.
+ *
+ * Stronger than the syntactic maps beside it: this says a value originating at
+ * `sources` actually reaches `sink`, not merely that both appear in the file.
+ */
+export type SourceDependencyFact = {
+  sink:
+    | 'condition'
+    | 'state-assignment'
+    | 'guarded-state-assignment'
+    | 'call-target'
+    | 'call-value'
+    | 'transfer-recipient'
+    | 'transfer-amount'
+    | 'return-value'
+    | 'analysis-failed'
+  sources: string[]
+  function?: string
+  detail?: string
+  sourcePath?: string
+  src?: string
+}
+
 export type VerifiedSourceSummary = {
   fullyQualifiedName: string
   compilerVersion: string
@@ -30,6 +54,7 @@ export type VerifiedSourceSummary = {
   externalCalls: SourceCallFact[]
   stateWrites: SourceWriteFact[]
   senderGates: SourceGateFact[]
+  dependencies?: SourceDependencyFact[]
   abi: unknown[]
   storageLayout: { storage?: unknown[]; types?: Record<string, unknown> }
   methodIdentifiers: Record<string, string>
@@ -72,7 +97,7 @@ function evidence(input: {
   return {
     id: `${input.detectorId}:${input.subject}`,
     detectorId: input.detectorId,
-    detectorVersion: '0.1.0',
+    detectorVersion: '0.2.0',
     severity: input.severity,
     evidenceClass: 'deterministic-fact',
     subject: input.subject,
@@ -140,5 +165,40 @@ export function sourceSummaryEvidence(input: {
       technical: { stateWrites: summary.stateWrites, senderGates: summary.senderGates },
     }))
   }
+  const dependencies = (summary.dependencies ?? []).filter((fact) => fact.sink !== 'analysis-failed')
+  if (dependencies.length) {
+    // Only the consequential sinks earn more than informational severity: a
+    // value reaching a return statement says much less than one reaching a
+    // branch condition, a state write, or a call target.
+    const decisive = dependencies.filter((fact) =>
+      fact.sink === 'condition'
+      || fact.sink === 'state-assignment'
+      || fact.sink === 'guarded-state-assignment'
+      || fact.sink === 'call-target'
+      || fact.sink === 'call-value')
+    const callerControlled = decisive.filter((fact) =>
+      fact.sources.includes('msg.sender') || fact.sources.includes('tx.origin'))
+
+    findings.push(evidence({
+      ...input,
+      detectorId: 'verified-source-dependency',
+      severity: callerControlled.length ? 'medium' : 'info',
+      title: callerControlled.length
+        ? 'Caller-derived values reach decisive sinks in verified source'
+        : 'Source-level data dependencies mapped',
+      claim: `${dependencies.length} intraprocedural dependenc${dependencies.length === 1 ? 'y' : 'ies'} were traced in the exact ${summary.compilerVersion} AST${
+        callerControlled.length
+          ? `, including ${callerControlled.length} where a caller-derived value reaches a branch condition, state write, or call target`
+          : ''
+      }. The analysis follows assignments through local variables in source order within a single function and records only lexically proven guards; it does not cross function boundaries, expand modifiers, or reason about storage aliasing, so a dependency it did not find is not evidence of absence.`,
+      technical: {
+        dependencies: dependencies.slice(0, 64),
+        decisiveCount: decisive.length,
+        callerControlledCount: callerControlled.length,
+        scope: 'intraprocedural',
+      },
+    }))
+  }
+
   return findings
 }

@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+} from 'react'
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
 import { solidity } from '@replit/codemirror-lang-solidity'
 import { Check, Code2, Copy, ExternalLink, FileCode2, Search } from 'lucide-react'
@@ -10,6 +19,12 @@ import {
   type SourcifyCompilationBundle,
 } from '../../data/source'
 import { selectPrimarySourcePath, sourceOutline } from './sourceSelection'
+import {
+  clampSourceSidebarWidth,
+  SOURCE_SIDEBAR_DEFAULT_WIDTH,
+  SOURCE_SIDEBAR_MAX_WIDTH,
+  SOURCE_SIDEBAR_MIN_WIDTH,
+} from './sourcePaneSize'
 
 type SourceLoadState =
   | { status: 'loading' }
@@ -17,6 +32,8 @@ type SourceLoadState =
   | { status: 'error'; message: string }
 
 const sourceCache = new Map<string, SourcifyCompilationBundle>()
+
+type SourceIdeStyle = CSSProperties & { '--source-sidebar-width': string }
 
 function contractLabel(node: ContractNode) {
   if (node.role === 'token') return 'Token'
@@ -61,7 +78,26 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
   const [mobilePane, setMobilePane] = useState<'files' | 'code'>('code')
   const [query, setQuery] = useState('')
   const [copied, setCopied] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(SOURCE_SIDEBAR_DEFAULT_WIDTH)
   const editorRef = useRef<ReactCodeMirrorRef>(null)
+  const ideRef = useRef<HTMLDivElement>(null)
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
+  const sourceEditorId = useId()
+
+  useEffect(() => {
+    const element = ideRef.current
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(([entry]) => {
+      const containerWidth = entry?.contentRect.width ?? 0
+      // The phone layout uses separate Files/Code panes and intentionally keeps
+      // the last desktop width for when the viewport grows again.
+      if (containerWidth > 640) {
+        setSidebarWidth((current) => clampSourceSidebarWidth(current, containerWidth))
+      }
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (cachedSource) return
@@ -121,6 +157,42 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
     setMobilePane('code')
   }
 
+  const resizeSidebar = (candidate: number) => {
+    setSidebarWidth(clampSourceSidebarWidth(candidate, ideRef.current?.clientWidth))
+  }
+
+  const startSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: sidebarWidth }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const moveSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
+    const resize = resizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    resizeSidebar(resize.startWidth + event.clientX - resize.startX)
+  }
+
+  const stopSidebarResize = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizeRef.current?.pointerId !== event.pointerId) return
+    resizeRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const resizeSidebarWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 32 : 16
+    let candidate: number | undefined
+    if (event.key === 'ArrowLeft') candidate = sidebarWidth - step
+    if (event.key === 'ArrowRight') candidate = sidebarWidth + step
+    if (event.key === 'Home') candidate = SOURCE_SIDEBAR_MIN_WIDTH
+    if (event.key === 'End') candidate = SOURCE_SIDEBAR_MAX_WIDTH
+    if (candidate === undefined) return
+    event.preventDefault()
+    resizeSidebar(candidate)
+  }
+
   if (loadState.status === 'loading') return <div className="source-loading source-ide-loading" role="status"><span /> Loading and matching the verified source bundle…</div>
   if (loadState.status === 'error') return <div className="source-load-error source-ide-error" role="alert"><b>Source bundle unavailable</b><span>{loadState.message}</span></div>
   if (!selectedPath || selectedSource === undefined) return <div className="source-ide-empty"><strong>No source file selected</strong></div>
@@ -135,7 +207,11 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
           <Code2 size={14} /> Code
         </button>
       </div>
-      <div className={`source-ide source-mobile-${mobilePane}`}>
+      <div
+        className={`source-ide source-mobile-${mobilePane}`}
+        ref={ideRef}
+        style={{ '--source-sidebar-width': `${sidebarWidth}px` } as SourceIdeStyle}
+      >
       <aside className="source-ide-sidebar">
         <div className="source-side-tabs" role="tablist" aria-label="Source navigation">
           <button type="button" role="tab" aria-selected={sideView === 'explorer'} onClick={() => setSideView('explorer')}>Explorer</button>
@@ -166,7 +242,26 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
           {!outline.length && <p>No declarations found.</p>}
         </div>
       </aside>
-      <section className="source-editor-pane" aria-label={`Source code for ${fileLabel(selectedPath)}`}>
+      <div
+        className="source-resize-handle"
+        role="separator"
+        aria-label="Resize source explorer"
+        aria-controls={sourceEditorId}
+        aria-orientation="vertical"
+        aria-valuemin={SOURCE_SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SOURCE_SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidth}
+        aria-valuetext={`${sidebarWidth} pixels`}
+        tabIndex={0}
+        title="Drag to resize · double-click to reset"
+        onDoubleClick={() => resizeSidebar(SOURCE_SIDEBAR_DEFAULT_WIDTH)}
+        onKeyDown={resizeSidebarWithKeyboard}
+        onPointerDown={startSidebarResize}
+        onPointerMove={moveSidebarResize}
+        onPointerUp={stopSidebarResize}
+        onPointerCancel={stopSidebarResize}
+      />
+      <section id={sourceEditorId} className="source-editor-pane" aria-label={`Source code for ${fileLabel(selectedPath)}`}>
         <div className="source-open-tab"><Code2 size={13} /><span>{fileLabel(selectedPath)}</span></div>
         <div className="source-editor-toolbar">
           <div className="source-breadcrumbs">{selectedPath.split('/').map((part, index) => <span key={`${part}:${index}`}>{part}</span>)}</div>

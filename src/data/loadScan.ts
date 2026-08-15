@@ -1,11 +1,26 @@
 import { autoload, providers } from '@shazow/whatsabi'
-import { getAddress, keccak256, type Address, type Hex, type PublicClient } from 'viem'
-import { attachInitializationTransactions, discoverPools, fetchTokenMetadata, type TokenMetadata } from '../adapters/uniswapV4'
+import { getAddress, keccak256, zeroAddress, type Address, type Hex, type PublicClient } from 'viem'
+import {
+  attachInitializationTransactions,
+  discoverPools,
+  fetchTokenMetadata,
+  type DiscoveryResult,
+  type TokenMetadata,
+} from '../adapters/uniswapV4'
 import type { ChainConfig } from '../config/chains'
 import type { ContractNode, PoolDescriptor, StaticSubject } from '../domain/report'
 import { fetchSourcifyStatus, sourcifyMatchesCodeHash } from './source'
+import { mapWithConcurrency } from './scanRpcClient'
 
 export type PinnedBlock = { number: bigint; hash: Hex; policy: string }
+export type PoolDiscoverySnapshot = {
+  chainId: number
+  token: Address
+  block: PinnedBlock
+  tokenMetadata: TokenMetadata
+  pools: PoolDescriptor[]
+  discovery: Pick<DiscoveryResult, 'source' | 'requests' | 'completeHistory' | 'indexedThroughBlock' | 'limitation'>
+}
 export type ScanSources = {
   block: PinnedBlock
   tokenMetadata: TokenMetadata
@@ -21,6 +36,58 @@ export type ScanSources = {
     requests: number
     indexedThroughBlock?: string
   }
+}
+
+export async function loadPoolDiscovery(input: {
+  client: PublicClient
+  chain: ChainConfig
+  token: Address
+  block?: bigint
+  signal?: AbortSignal
+  onProgress?: (detail: string) => void
+}): Promise<PoolDiscoverySnapshot> {
+  const { client, chain, token, signal, onProgress } = input
+  onProgress?.('Pinning a reproducible block')
+  const block = await pinBlock(client, chain, input.block)
+  if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
+
+  onProgress?.('Loading and verifying Uniswap v4 pools')
+  const [discovery, tokenMetadata] = await Promise.all([
+    discoverPools(client, chain, token, block.number, signal),
+    fetchTokenMetadata(client, token, block.number),
+  ])
+  if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
+
+  return {
+    chainId: chain.id,
+    token,
+    block,
+    tokenMetadata,
+    pools: discovery.pools,
+    discovery: {
+      source: discovery.source,
+      requests: discovery.requests,
+      completeHistory: discovery.completeHistory,
+      indexedThroughBlock: discovery.indexedThroughBlock,
+      limitation: discovery.limitation,
+    },
+  }
+}
+
+export function selectDiscoveredPools(
+  discovery: PoolDiscoverySnapshot,
+  selectedPoolIds: readonly Hex[],
+  limit = 20,
+): PoolDescriptor[] {
+  const normalized = new Set(selectedPoolIds.map((poolId) => poolId.toLowerCase()))
+  if (normalized.size === 0) throw new Error('Select at least one pool to analyze.')
+  if (normalized.size > limit) throw new Error(`Select no more than ${limit} pools for one report.`)
+
+  const selected = discovery.pools.filter((pool) => normalized.has(pool.poolId.toLowerCase()))
+  if (selected.length !== normalized.size) {
+    throw new Error('One or more selected pools do not belong to this pinned token discovery.')
+  }
+  return selected
 }
 
 export async function pinBlock(
@@ -158,42 +225,58 @@ export async function loadScanSources(input: {
   token: Address
   block?: bigint
   poolCursor?: string
+  discoverySnapshot?: PoolDiscoverySnapshot
+  selectedPoolIds?: readonly Hex[]
   poolLimit: 20
   signal?: AbortSignal
   onProgress?: (detail: string) => void
 }): Promise<ScanSources> {
   const { client, chain, token, signal, onProgress } = input
-  onProgress?.('Pinning a reproducible block')
-  const block = await pinBlock(client, chain, input.block)
-  if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
-
-  onProgress?.('Discovering PoolManager Initialize events')
-  const [discovery, tokenMetadata] = await Promise.all([
-    discoverPools(client, chain, token, block.number, signal),
-    fetchTokenMetadata(client, token, block.number),
-  ])
+  const snapshot = input.discoverySnapshot ?? await loadPoolDiscovery({
+    client,
+    chain,
+    token,
+    block: input.block,
+    signal,
+    onProgress,
+  })
+  if (snapshot.chainId !== chain.id || snapshot.token.toLowerCase() !== token.toLowerCase()) {
+    throw new Error('The selected pools were discovered for a different chain or token.')
+  }
+  const { block, tokenMetadata } = snapshot
+  const discovery = { pools: snapshot.pools, ...snapshot.discovery }
   const offset = Math.max(0, Number(input.poolCursor ?? '0') || 0)
-  const selectedPools = discovery.pools.slice(offset, offset + input.poolLimit)
+  const selectedPools = input.selectedPoolIds
+    ? selectDiscoveredPools(snapshot, input.selectedPoolIds, input.poolLimit)
+    : discovery.pools.slice(offset, offset + input.poolLimit)
   onProgress?.(`Verifying ${selectedPools.length} selected pool initialization${selectedPools.length === 1 ? '' : 's'}`)
   const initialized = chain.poolManager
     ? await attachInitializationTransactions(client, chain.poolManager, selectedPools, signal)
     : { pools: selectedPools, requests: 0, unresolved: selectedPools.length }
   const pools = initialized.pools
-  const hasMore = offset + input.poolLimit < discovery.pools.length
+  const hasMore = selectedPools.length < discovery.pools.length
   const affectedByHook = new Map<Address, Hex[]>()
   for (const pool of pools) {
+    if (pool.hook.toLowerCase() === zeroAddress) continue
     const existing = affectedByHook.get(pool.hook) ?? []
     existing.push(pool.poolId)
     affectedByHook.set(pool.hook, existing)
   }
 
   onProgress?.(`Resolving ${affectedByHook.size} unique hook codehash${affectedByHook.size === 1 ? '' : 'es'}`)
-  const resolved = await Promise.all([
-    resolveContract(client, chain.id, token, 'token', pools.map((pool) => pool.poolId), block.number, signal),
-    ...[...affectedByHook.entries()].map(([hook, affectedPools]) =>
-      resolveContract(client, chain.id, hook, 'hook', affectedPools, block.number, signal),
-    ),
-  ])
+  const targets = [
+    { address: token, role: 'token' as const, affectedPools: pools.map((pool) => pool.poolId) },
+    ...[...affectedByHook.entries()].map(([address, affectedPools]) => ({ address, role: 'hook' as const, affectedPools })),
+  ]
+  const resolved = await mapWithConcurrency({
+    items: targets,
+    concurrency: 4,
+    signal,
+    map: ({ address, role, affectedPools }, index) => {
+      onProgress?.(`Resolving contract ${index + 1} of ${targets.length}`)
+      return resolveContract(client, chain.id, address, role, affectedPools, block.number, signal)
+    },
+  })
 
   const subjectByHash = new Map<Hex, StaticSubject>()
   const nodeByIdentity = new Map<string, ContractNode>()
@@ -211,7 +294,11 @@ export async function loadScanSources(input: {
     discovery.limitation,
     ...resolved.flatMap((group) => group.limitations),
     discovery.pools.length === 0 ? 'No verified Uniswap v4 pools containing this token were found at the pinned block.' : undefined,
-    hasMore ? `This report covers ${pools.length} of ${discovery.pools.length} discovered pools.` : undefined,
+    hasMore
+      ? input.selectedPoolIds
+        ? `This report covers ${pools.length} user-selected pool${pools.length === 1 ? '' : 's'} out of ${discovery.pools.length} discovered pools.`
+        : `This report covers ${pools.length} of ${discovery.pools.length} discovered pools.`
+      : undefined,
     initialized.unresolved > 0
       ? `${initialized.unresolved} selected pool initialization transaction${initialized.unresolved === 1 ? ' was' : 's were'} unavailable; pinned-state analysis remains available but historical replay is not.`
       : undefined,
@@ -223,7 +310,7 @@ export async function loadScanSources(input: {
     pools,
     poolCount: discovery.pools.length,
     hasMore,
-    nextCursor: hasMore ? String(offset + input.poolLimit) : undefined,
+    nextCursor: hasMore && !input.selectedPoolIds ? String(offset + input.poolLimit) : undefined,
     subjects: [...subjectByHash.values()],
     preResolvedNodes: [...nodeByIdentity.values()],
     limitations,

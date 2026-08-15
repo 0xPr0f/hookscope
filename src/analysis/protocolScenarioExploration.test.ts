@@ -6,7 +6,7 @@ import {
   runProtocolScenarioExploration,
   selectExplorationSeeds,
 } from './protocolScenarioExploration'
-import type { ForkExplorationEpoch } from './revmProof'
+import type { ForkExplorationEpoch, ForkReplayTransaction } from './revmProof'
 import { POOL_EVENT_TOPICS } from './protocolScenarioValidation'
 
 const POOL_MANAGER = '0x000000000004444c5dc75cB358380D2e3dE08A90' as Address
@@ -107,16 +107,18 @@ function warmProof(success = true, calldata?: Hex) {
 }
 
 function session(
-  explore?: (input: { transaction: { calldata: Hex; gasPrice: bigint }; mutableIndices: number[] }) => Promise<ForkExplorationEpoch>,
-  warm: (input: { transaction: { calldata: Hex; gasPrice: bigint } }) => ReturnType<typeof warmProof> =
+  explore?: (input: { transaction: ForkReplayTransaction; mutableIndices: number[] }) => Promise<ForkExplorationEpoch>,
+  warm: (input: { transaction: ForkReplayTransaction }) => ReturnType<typeof warmProof> =
     (input) => warmProof(true, input.transaction.calldata),
 ) {
   const warmedCalldata: Hex[] = []
   const gasPrices: bigint[] = []
+  const executionModes: (string | undefined)[] = []
   const close = vi.fn()
   const calls: { calldata: Hex; indices: number[]; gasPrice: bigint }[] = []
   const run = explore ?? (async ({ transaction, mutableIndices }) => {
     gasPrices.push(transaction.gasPrice)
+    executionModes.push(transaction.executionMode)
     calls.push({ calldata: transaction.calldata, indices: mutableIndices, gasPrice: transaction.gasPrice })
     return epochFor(transaction.calldata, mutableIndices, 2)
   })
@@ -124,11 +126,13 @@ function session(
     calls,
     warmedCalldata,
     gasPrices,
+    executionModes,
     close,
     factory: () => ({
       hydrate: async () => 2,
-      warm: async (input: { transaction: { calldata: Hex; gasPrice: bigint } }) => {
+      warm: async (input: { transaction: ForkReplayTransaction }) => {
         gasPrices.push(input.transaction.gasPrice)
+        executionModes.push(input.transaction.executionMode)
         warmedCalldata.push(input.transaction.calldata)
         return warm(input)
       },
@@ -176,7 +180,8 @@ describe('generated exploration run', () => {
     expect(spy.close).toHaveBeenCalledTimes(1)
     expect(coverage.hydrationReads).toBe(7)
     expect(spy.gasPrices.length).toBeGreaterThan(1)
-    expect(spy.gasPrices.every((gasPrice) => gasPrice === pinnedBlock.baseFeePerGas)).toBe(true)
+    expect(spy.gasPrices.every((gasPrice) => gasPrice === 0n)).toBe(true)
+    expect(spy.executionModes.every((mode) => mode === 'simulation')).toBe(true)
   })
 
   it('marks its evidence generated and attaches no historical transaction', async () => {

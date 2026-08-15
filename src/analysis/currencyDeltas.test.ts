@@ -103,6 +103,21 @@ describe('Uniswap v4 currency deltas', () => {
     })).toEqual([])
   })
 
+  it('uses the storage context for transient writes executed from delegated code', () => {
+    const slot = currencyDeltaSlot(ACTOR, CURRENCY0)
+    const access = {
+      ...tstore(slot, word(-5n), OTHER),
+      frameId: 2,
+      storageAddress: MANAGER,
+    }
+    expect(decodeCurrencyDeltas({
+      proof: proof([access]),
+      poolManager: MANAGER,
+      accounts: [ACTOR],
+      currencies: [CURRENCY0],
+    })[0]).toMatchObject({ account: ACTOR, currency: CURRENCY0, delta: '-5' })
+  })
+
   it('reports nothing when execution wrote no transient storage', () => {
     expect(decodeCurrencyDeltas({
       proof: proof([{ address: MANAGER, pc: 1, opcode: 'SSTORE', slot: '0x01', value: '0x02' }]),

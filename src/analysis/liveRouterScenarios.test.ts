@@ -13,7 +13,7 @@ import { computePoolId } from '../adapters/uniswapV4Pool'
 import type { PoolDescriptor } from '../domain/report'
 import type { LivePoolReplayCoverage } from './livePoolReplay'
 import { buildLiveRouterScenarios, runLiveRouterScenarios } from './liveRouterScenarios'
-import type { ForkReplayResult } from './revmProof'
+import type { ForkExecutionSession, ForkReplayResult } from './revmProof'
 
 const CURRENCY0 = '0x0000000000000000000000000000000000000000' as Address
 const CURRENCY1 = '0x1111111111111111111111111111111111111111' as Address
@@ -231,7 +231,11 @@ describe('live official-router scenarios', () => {
     const calldata = routerCalldata()
     const variants = buildLiveRouterScenarios(pool, calldata)
     const prefetch = vi.fn(async () => ({ hydratedAccounts: 6, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 18, executions: 0 }))
-    const execute = vi.fn(async () => replayResult())
+    const executedInputs: Parameters<ForkExecutionSession['execute']>[0][] = []
+    const execute = vi.fn(async (input: Parameters<ForkExecutionSession['execute']>[0]) => {
+      executedInputs.push(input)
+      return replayResult()
+    })
     const close = vi.fn()
     const coverage = await runLiveRouterScenarios({
       scanId: 'router-test',
@@ -253,6 +257,10 @@ describe('live official-router scenarios', () => {
     expect(coverage.scenarios).toBe(variants.length + 1)
     expect(prefetch).toHaveBeenCalledTimes(1)
     expect(execute).toHaveBeenCalledTimes(variants.length + 2)
+    expect(executedInputs.every(({ transaction }) =>
+      transaction.executionMode === 'simulation'
+        && transaction.gasPrice === 0n
+        && transaction.maxPriorityFeePerGas === undefined)).toBe(true)
     expect(close).toHaveBeenCalledTimes(1)
     expect(coverage.findings.every((finding) => finding.witness?.value === '7')).toBe(true)
   })

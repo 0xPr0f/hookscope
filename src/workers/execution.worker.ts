@@ -16,6 +16,7 @@ type Command =
   | { type: 'prime-fork-session'; scanId: string; updates: ForkHydrationUpdate[] }
   | { type: 'execute-fork'; scanId: string; runId: string; transaction: unknown; block: unknown; commit: boolean }
   | { type: 'hydrate-fork'; scanId: string; runId: string; update: ForkHydrationUpdate }
+  | { type: 'cancel-fork'; scanId: string; runId: string }
   | { type: 'dispose-fork-session'; scanId: string }
 
 type ForkSnapshotAccount = {
@@ -95,6 +96,9 @@ self.onmessage = async (event: MessageEvent<Command>) => {
       if (!session?.run || session.run.runId !== command.runId) throw new Error(`Fork run ${command.runId} is no longer active.`)
       hydrate_fork_session(command.scanId, command.update)
       executeFork(command.scanId, session)
+    } else if (command.type === 'cancel-fork') {
+      const session = forkSessions.get(command.scanId)
+      if (session?.run?.runId === command.runId) session.run = undefined
     } else {
       dispose_fork_session(command.scanId)
       forkSessions.delete(command.scanId)

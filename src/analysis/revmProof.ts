@@ -1,9 +1,25 @@
 import { getAddress, toHex, type Address, type Hex, type PublicClient } from 'viem'
 
-export type RevmStepEvidence = { address: string; pc: number; opcode: string }
+export type RevmStepEvidence = {
+  /** Stable identity of the active call/create frame. Present on current engine proofs. */
+  frameId?: number
+  /** Address whose bytecode supplied this instruction. */
+  address: string
+  /** Address whose persistent/transient storage this instruction addresses. */
+  storageAddress?: string
+  pc: number
+  opcode: string
+}
 export type RevmCallEvidence = {
+  /** Stable identity of this call frame. Legacy cached proofs may not contain it. */
+  frameId?: number
+  parentFrameId?: number
+  depth?: number
+  /** EVM message sender visible as msg.sender in the new frame. */
   caller: string
+  /** Storage/address context of the frame (`target_address` in revm). */
   target: string
+  /** Account whose bytecode executes (`bytecode_address` in revm). */
   bytecodeAddress: string
   scheme: string
   value: string
@@ -12,7 +28,10 @@ export type RevmCallEvidence = {
   selector?: Hex
 }
 export type RevmStorageDiff = { address: string; slot: Hex; before: Hex; after: Hex }
-/** A storage-family opcode with the key it addressed; `value` is present for writes. */
+/**
+ * A storage-family opcode with the key it addressed; `value` is present for writes.
+ * `address` is the code address while `storageAddress` is the actual state context.
+ */
 export type RevmStorageAccess = RevmStepEvidence & { slot?: Hex; value?: Hex }
 export type RevmLogEvidence = { address: string; topics: Hex[]; data: Hex }
 export type RevmBalanceChange = { address: string; before: string; after: string }
@@ -61,6 +80,20 @@ type RevmWorkerEvent =
   | { type: 'failure'; scanId: string; message: string }
 
 export type ForkReplayTransaction = {
+  /**
+   * How this execution is validated.
+   *
+   * `transaction` keeps the real nonce, base-fee and balance rules, which is
+   * what makes a historical replay a reproduction rather than an approximation.
+   * `simulation` is `eth_call` semantics, for generated and read-only calls
+   * nobody signed: their caller's real nonce is untracked and charging gas would
+   * consume the native balance an observation may be about. The block still
+   * reports its real base fee either way, so `BASEFEE` stays accurate.
+   *
+   * Defaults to `transaction` when unset, so relaxed validation is always opted
+   * into rather than inherited by accident.
+   */
+  executionMode?: 'transaction' | 'simulation'
   caller: Address
   to: Address
   calldata: Hex
@@ -145,8 +178,21 @@ export type ForkSessionMetrics = {
 /** An exploration session counts pinned reads; it does not own the execution counters a replay session reports. */
 export type ForkExplorationMetrics = Pick<ForkSessionMetrics, 'rpcReads' | 'hydratedAccounts' | 'hydratedStorageSlots'>
 
-function serializedTransaction(input: ForkReplayTransaction) {
+/**
+ * Converts the browser transaction model into the JSON shape consumed by the
+ * Wasm worker.
+ *
+ * Keep executionMode explicit here. Rust intentionally defaults a missing
+ * value to strict transaction validation, so dropping the field would turn
+ * generated eth_call-style executions back into nonce/base-fee checked
+ * transactions at the worker boundary.
+ */
+export function serializeForkReplayTransaction(input: ForkReplayTransaction) {
   return {
+    // serde treats an explicitly present `undefined` as a unit value, not as a
+    // missing optional field. Omit it entirely so historical replays retain
+    // Rust's strict default while generated calls opt into simulation.
+    ...(input.executionMode ? { executionMode: input.executionMode } : {}),
     caller: input.caller,
     to: input.to,
     calldata: input.calldata,
@@ -528,9 +574,17 @@ export class ForkExecutionSession {
     if (input.signal.aborted) throw new DOMException('Fork replay cancelled', 'AbortError')
     return new Promise((resolve, reject) => {
       const runId = crypto.randomUUID()
-      const cancel = () => this.finishActive(() => reject(new DOMException('Fork replay cancelled', 'AbortError')))
+      const cancel = () => {
+        this.worker.postMessage({ type: 'cancel-fork', scanId: this.input.scanId, runId })
+        this.finishActive(() => reject(new DOMException('Fork replay cancelled', 'AbortError')))
+      }
       const timeout = window.setTimeout(
-        () => this.finishActive(() => reject(new Error('Fork replay exceeded its browser time budget.'))),
+        () => {
+          // The worker may be paused waiting for an RPC hydration response. It
+          // must forget that run before a later execute command is accepted.
+          this.worker.postMessage({ type: 'cancel-fork', scanId: this.input.scanId, runId })
+          this.finishActive(() => reject(new Error('Fork replay exceeded its browser time budget.')))
+        },
         input.timeoutMs ?? 30_000,
       )
       this.active = {
@@ -549,7 +603,7 @@ export class ForkExecutionSession {
         type: 'execute-fork',
         scanId: this.input.scanId,
         runId,
-        transaction: serializedTransaction(input.transaction),
+        transaction: serializeForkReplayTransaction(input.transaction),
         block: serializedBlock(input.block),
         commit: input.commit ?? false,
       })
@@ -642,10 +696,14 @@ export class ForkExecutionSession {
       }
       active.input.onHydration?.(active.requestCount, request)
       const update = await this.load(request)
+      // A timeout/cancellation can finish the run while the RPC request is in
+      // flight. Never hydrate that stale run or interfere with its successor.
+      if (this.active !== active) return
       if (active.input.signal.aborted) throw new DOMException('Fork replay cancelled', 'AbortError')
       active.handling = false
       this.worker.postMessage({ type: 'hydrate-fork', scanId: this.input.scanId, runId: active.runId, update })
     } catch (error) {
+      if (this.active !== active) return
       this.finishActive(() => active.reject(error))
     }
   }
@@ -761,7 +819,7 @@ export class ForkExplorationSession {
         type: 'warm-fork',
         scanId: this.input.scanId,
         runId,
-        transaction: serializedTransaction(input.transaction),
+        transaction: serializeForkReplayTransaction(input.transaction),
         block: serializedBlock(input.block),
       })
     })
@@ -803,7 +861,7 @@ export class ForkExplorationSession {
         type: 'fuzz-fork',
         scanId: this.input.scanId,
         runId,
-        transaction: serializedTransaction(input.transaction),
+        transaction: serializeForkReplayTransaction(input.transaction),
         block: serializedBlock(input.block),
         mutableIndices: input.mutableIndices,
         maxExecutions: Math.min(30_000, Math.max(1, input.maxExecutions)),

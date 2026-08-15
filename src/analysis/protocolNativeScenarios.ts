@@ -22,6 +22,21 @@ export const SCENARIO_ABI = parseAbi([
   'function run(Step[] steps) returns (int256[] deltas)',
 ])
 
+/**
+ * The ERC-20 settlement lane's entry point.
+ *
+ * Same step encoding as the claims lane, plus the explicit payer and recipient
+ * that lane requires. Kept as its own ABI rather than an optional argument
+ * because the two harnesses are separate deployed programs: encoding one call
+ * for the other's selector would fail at the ABI decoder rather than anywhere
+ * informative.
+ */
+export const ERC20_SCENARIO_ABI = parseAbi([
+  'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
+  'struct Step { uint8 operation; PoolKey key; bool zeroForOne; int256 amountSpecified; uint160 sqrtPriceLimitX96; int24 tickLower; int24 tickUpper; int256 liquidityDelta; bytes32 salt; uint256 amount0; uint256 amount1; bytes hookData; }',
+  'function run(Step[] steps, address payer, address recipient) returns (int256[] deltas)',
+])
+
 export const OPERATION = { swap: 0, modifyLiquidity: 1, donate: 2 } as const
 
 export type ScenarioPoolKey = {
@@ -75,8 +90,47 @@ export type ProtocolScenarioMatrix = {
   unavailable: ScenarioUnavailable[]
 }
 
+/**
+ * The four corners of the caller-dependence probe.
+ *
+ * Held as data so the comparator can pair them by name rather than by
+ * re-deriving which two scenarios differ in one variable.
+ */
+export const CALLER_PROBES = [
+  {
+    id: 'baseline',
+    caller: 'actor',
+    via: 'router',
+    description: 'exact-input 0-for-1 swap from the primary actor through the primary harness instance',
+  },
+  {
+    id: 'tx-caller',
+    caller: 'alternateActor',
+    via: 'router',
+    description: 'the same swap with only the transaction caller changed',
+  },
+  {
+    id: 'hook-sender',
+    caller: 'actor',
+    via: 'alternateRouter',
+    description: 'the same swap with only the hook-visible sender changed, by routing through a second identical harness instance',
+  },
+  {
+    id: 'both',
+    caller: 'alternateActor',
+    via: 'alternateRouter',
+    description: 'the same swap with both the transaction caller and the hook-visible sender changed',
+  },
+] as const satisfies readonly {
+  id: string
+  caller: ProtocolScenario['caller']
+  via: ProtocolScenario['via']
+  description: string
+}[]
+
 const EMPTY_SALT = `0x${'0'.repeat(64)}` as Hex
 const MARKER_HOOK_DATA = '0x686f6f6b73636f7065' as Hex
+const RAW_HOOK_DATA = '0xdeadbeef' as Hex
 
 /** Bounded amounts: large enough to move the pool, far below any real reserve. */
 const SWAP_AMOUNTS: { label: string; amount: bigint }[] = [
@@ -104,6 +158,45 @@ function baseStep(key: ScenarioPoolKey): ScenarioStep {
 
 export function encodeScenario(steps: ScenarioStep[]): Hex {
   return encodeFunctionData({ abi: SCENARIO_ABI, functionName: 'run', args: [steps] })
+}
+
+/**
+ * Builds one swap scenario with a caller-chosen direction and amount.
+ *
+ * The matrix uses fixed amounts, which cannot express a round trip: the reverse
+ * leg has to spend exactly what the forward leg delivered, and that number is
+ * only known after the forward leg has run.
+ */
+export function buildSwapScenario(input: {
+  id: string
+  description: string
+  key: ScenarioPoolKey
+  zeroForOne: boolean
+  amountSpecified: bigint
+}): ProtocolScenario {
+  const steps = [swapStep(input.key, {
+    zeroForOne: input.zeroForOne,
+    amountSpecified: input.amountSpecified,
+  })]
+  return {
+    id: input.id,
+    operation: 'swap',
+    description: input.description,
+    caller: 'actor',
+    via: 'router',
+    commits: true,
+    steps,
+    calldata: encodeScenario(steps),
+  }
+}
+
+/** Encodes the same steps for the ERC-20 lane, naming who pays and who receives. */
+export function encodeErc20Scenario(steps: ScenarioStep[], payer: Address, recipient: Address): Hex {
+  return encodeFunctionData({
+    abi: ERC20_SCENARIO_ABI,
+    functionName: 'run',
+    args: [steps, payer, recipient],
+  })
 }
 
 function swapStep(key: ScenarioPoolKey, input: {
@@ -186,6 +279,7 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
   // Hook data shapes on a single representative swap.
   for (const [label, hookData] of [
     ['empty', '0x' as Hex],
+    ['raw-four-byte', RAW_HOOK_DATA],
     ['marker', MARKER_HOOK_DATA],
     ['abi-actor', `0x${input.actor.slice(2).toLowerCase().padStart(64, '0')}` as Hex],
   ] as const) {
@@ -199,18 +293,25 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
     })
   }
 
-  // Alternate sender: the same swap driven by a second, byte-identical harness
-  // instance at a different address, sent by a different actor. This is what a
-  // hook that gates on its caller actually sees change.
-  push({
-    id: 'swap:alternate-sender',
-    operation: 'swap',
-    description: 'exact-input 0-for-1 swap driven by a second identical harness instance at a different address, sent by an alternate synthetic actor',
-    caller: 'alternateActor',
-    via: 'alternateRouter',
-    commits: false,
-    steps: [swapStep(key, { zeroForOne: true, amountSpecified: -1_000n })],
-  })
+  // Caller-dependence probe: the same swap under all four combinations of
+  // transaction caller and harness instance.
+  //
+  // Changing both at once proves only that some context difference matters. It
+  // cannot say which, because a hook's `sender` argument is the contract that
+  // called the PoolManager while `tx.origin` is the account that signed. Varying
+  // them independently is what makes the cause attributable, and the baseline is
+  // named separately so each pair differs in exactly one variable.
+  for (const probe of CALLER_PROBES) {
+    push({
+      id: `caller-probe:${probe.id}`,
+      operation: 'swap',
+      description: probe.description,
+      caller: probe.caller,
+      via: probe.via,
+      commits: false,
+      steps: [swapStep(key, { zeroForOne: true, amountSpecified: -1_000n })],
+    })
+  }
 
   // Repeated swaps in one committed sequence expose transient or one-shot gates.
   push({
@@ -222,6 +323,19 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
     steps: [
       swapStep(key, { zeroForOne: true, amountSpecified: -1_000n }),
       swapStep(key, { zeroForOne: true, amountSpecified: -1_000n }),
+    ],
+  })
+
+  push({
+    id: 'sequence:alternating-swaps',
+    operation: 'sequence',
+    description: 'three exact-input swaps alternating both pool directions in one sequence',
+    caller: 'actor',
+    commits: true,
+    steps: [
+      swapStep(key, { zeroForOne: true, amountSpecified: -2_000n }),
+      swapStep(key, { zeroForOne: false, amountSpecified: -2_000n }),
+      swapStep(key, { zeroForOne: true, amountSpecified: -2_000n }),
     ],
   })
 
@@ -260,6 +374,21 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
         steps: [add(narrow, liquidity)],
       })
 
+      for (const [label, amount] of [
+        ['small', 1_000_000n],
+        ['medium', 1_000_000_000n],
+        ['bounded', 1_000_000_000_000n],
+      ] as const) {
+        push({
+          id: `liquidity:add:amount-${label}`,
+          operation: 'liquidity',
+          description: `add a ${label} bounded liquidity amount across the narrow aligned range`,
+          caller: 'actor',
+          commits: false,
+          steps: [add(narrow, amount)],
+        })
+      }
+
       if (wide) {
         push({
           id: 'liquidity:add:wide',
@@ -268,6 +397,25 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
           caller: 'actor',
           commits: false,
           steps: [add(wide, liquidity)],
+        })
+      }
+
+
+      const minimumAlignedTick = alignTick(MIN_TICK, key.tickSpacing) + key.tickSpacing
+      const maximumAlignedTick = alignTick(MAX_TICK, key.tickSpacing)
+      const boundaryRanges = [
+        ['lower-bound', { tickLower: minimumAlignedTick, tickUpper: minimumAlignedTick + key.tickSpacing }],
+        ['full', { tickLower: minimumAlignedTick, tickUpper: maximumAlignedTick }],
+        ['upper-bound', { tickLower: maximumAlignedTick - key.tickSpacing, tickUpper: maximumAlignedTick }],
+      ] as const
+      for (const [label, range] of boundaryRanges) {
+        push({
+          id: `liquidity:add:range-${label}`,
+          operation: 'liquidity',
+          description: `add liquidity across the ${label} protocol-aligned range [${range.tickLower}, ${range.tickUpper}]`,
+          caller: 'actor',
+          commits: false,
+          steps: [add(range, liquidity)],
         })
       }
 
@@ -297,6 +445,15 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
         caller: 'actor',
         commits: false,
         steps: [add(narrow, liquidity), add(narrow, liquidity)],
+      })
+
+      push({
+        id: 'sequence:three-liquidity-adds',
+        operation: 'sequence',
+        description: 'three liquidity additions to the same aligned range in one sequence',
+        caller: 'actor',
+        commits: false,
+        steps: [add(narrow, liquidity), add(narrow, liquidity), add(narrow, liquidity)],
       })
     }
   }
@@ -330,6 +487,14 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
     caller: 'actor',
     commits: false,
     steps: [donate(1_000n, 1_000n), donate(1_000n, 1_000n)],
+  })
+  push({
+    id: 'sequence:three-donations',
+    operation: 'sequence',
+    description: 'three donations executed in one sequence',
+    caller: 'actor',
+    commits: false,
+    steps: [donate(100n, 100n), donate(200n, 200n), donate(300n, 300n)],
   })
 
   return { scenarios, unavailable }

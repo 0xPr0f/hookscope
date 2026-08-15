@@ -1,5 +1,6 @@
 import { getAddress, keccak256, pad, type Address, type Hex } from 'viem'
 import manifest from '../fixtures/generated/protocol-scenario-router.json'
+import erc20Manifest from '../fixtures/generated/protocol-erc20-scenario-router.json'
 
 /**
  * Injection contract for the generated-scenario harness.
@@ -24,6 +25,25 @@ import manifest from '../fixtures/generated/protocol-scenario-router.json'
 
 export type ProtocolScenarioManifest = typeof manifest
 
+/**
+ * The fields injection actually depends on.
+ *
+ * Structural rather than `typeof manifest`, because the two lanes expose
+ * different `run` signatures and so have different literal selector maps. The
+ * patcher has no business caring about that difference.
+ */
+export type HarnessManifest = {
+  schemaVersion: string
+  runtimeBytecode: string
+  runtimeBytes: number
+  templateHash: string
+  templateKeccak: string
+  sourceHash: string
+  immutablePoolManagerPositions: { start: number; length: number }[]
+  compiler: { solc: string }
+  uniswap: { core: string; periphery: string; coreIntegrity: string; peripheryIntegrity: string }
+}
+
 export type PatchedScenarioRouter = {
   runtimeBytecode: Hex
   /** keccak256 of the patched runtime, which is the code hash revm will report. */
@@ -38,7 +58,7 @@ export type PatchedScenarioRouter = {
 
 export class ScenarioArtifactError extends Error {}
 
-function assertTemplateIntegrity(template: string) {
+function assertTemplateIntegrity(template: string, manifest: HarnessManifest) {
   if (manifest.schemaVersion !== '1') {
     throw new ScenarioArtifactError('Scenario harness manifest schema is unsupported.')
   }
@@ -62,8 +82,24 @@ function assertTemplateIntegrity(template: string) {
  * how `abi.encode(address)` pads it.
  */
 export function patchScenarioRouter(poolManager: Address): PatchedScenarioRouter {
+  return patchHarness(poolManager, manifest)
+}
+
+/**
+ * Patches the ERC-20 settlement lane's harness.
+ *
+ * Same rules as the claims lane, against its own manifest: the two are separate
+ * compiled programs with separate immutable positions, and sharing a patcher
+ * without sharing a manifest is what would let one lane be injected with the
+ * other's bytes.
+ */
+export function patchErc20ScenarioRouter(poolManager: Address): PatchedScenarioRouter {
+  return patchHarness(poolManager, erc20Manifest)
+}
+
+function patchHarness(poolManager: Address, manifest: HarnessManifest): PatchedScenarioRouter {
   const template = manifest.runtimeBytecode
-  assertTemplateIntegrity(template)
+  assertTemplateIntegrity(template, manifest)
 
   const address = getAddress(poolManager)
   const word = pad(address, { size: 32 }).slice(2).toLowerCase()
@@ -111,6 +147,19 @@ export function verifyPatchedRouter(patched: Hex, poolManager: Address): boolean
     return patchScenarioRouter(poolManager).runtimeBytecode.toLowerCase() === patched.toLowerCase()
   } catch {
     return false
+  }
+}
+
+/** Static identity of the ERC-20 harness build. */
+export function erc20HarnessIdentity() {
+  return {
+    contract: erc20Manifest.contract,
+    settlement: erc20Manifest.settlement,
+    templateHash: erc20Manifest.templateHash,
+    sourceHash: erc20Manifest.sourceHash,
+    compiler: erc20Manifest.compiler.solc,
+    uniswapCore: erc20Manifest.uniswap.core,
+    uniswapPeriphery: erc20Manifest.uniswap.periphery,
   }
 }
 

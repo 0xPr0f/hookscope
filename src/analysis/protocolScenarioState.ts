@@ -1,7 +1,11 @@
 import { encodeAbiParameters, keccak256, toHex, type Address, type Hex } from 'viem'
 import manifest from '../fixtures/generated/protocol-scenario-router.json'
 import type { ForkSnapshot, ForkSnapshotAccount } from './revmProof'
-import { patchScenarioRouter, type PatchedScenarioRouter } from './protocolScenarioArtifact'
+import {
+  patchErc20ScenarioRouter,
+  patchScenarioRouter,
+  type PatchedScenarioRouter,
+} from './protocolScenarioArtifact'
 
 /**
  * Declared state overlay for generated PoolManager scenarios.
@@ -62,6 +66,13 @@ export type ScenarioStateInput = {
    * because the harness is always the contract that calls the PoolManager.
    */
   routers: readonly Address[]
+  /**
+   * ERC-20 settlement harness instances, a separate compiled program from the
+   * claims lane. They are funded with native currency but deliberately granted
+   * no claim balance: this lane must pay with a real account's tokens, and a
+   * claim balance would give it a synthetic way out.
+   */
+  erc20Routers?: readonly Address[]
   actors: readonly Address[]
   currencies: readonly [Address, Address]
   funding?: ScenarioActorFunding
@@ -70,6 +81,8 @@ export type ScenarioStateInput = {
 export type ScenarioStateOverlay = {
   snapshot: ForkSnapshot
   patched: PatchedScenarioRouter
+  /** Present only when an ERC-20 settlement harness was injected. */
+  patchedErc20?: PatchedScenarioRouter
   /** Every override applied, so a report can declare them rather than imply them. */
   declaredOverrides: {
     address: Address
@@ -90,6 +103,8 @@ export type ScenarioStateOverlay = {
 export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioStateOverlay {
   const funding = input.funding ?? DEFAULT_FUNDING
   const patched = patchScenarioRouter(input.poolManager)
+  const erc20Routers = input.erc20Routers ?? []
+  const patchedErc20 = erc20Routers.length ? patchErc20ScenarioRouter(input.poolManager) : undefined
 
   if (!input.routers.length) throw new Error('A scenario overlay needs at least one harness instance.')
 
@@ -122,6 +137,19 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
     storageComplete: true,
   }))
 
+  const erc20RouterAccounts: ForkSnapshotAccount[] = erc20Routers.map((address) => ({
+    address,
+    exists: true,
+    // The account may be pre-funded for fixture compatibility, but the harness
+    // records that balance and refuses to consume it. Native input must arrive
+    // as call value; token debts must still come from a real, approved account.
+    balance: toHex(funding.nativeWei, { size: 32 }),
+    nonce: 1,
+    code: patchedErc20!.runtimeBytecode,
+    storage: {},
+    storageComplete: true,
+  }))
+
   const actorAccounts: ForkSnapshotAccount[] = input.actors.map((address) => ({
     address,
     exists: true,
@@ -138,6 +166,11 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
       kind: 'harness-code' as const,
       detail: `Injected scenario harness runtime ${patched.runtimeHash} bound to PoolManager ${patched.poolManager}.`,
     })),
+    ...erc20Routers.map((address) => ({
+      address,
+      kind: 'harness-code' as const,
+      detail: `Injected ERC-20 settlement harness runtime ${patchedErc20!.runtimeHash} bound to PoolManager ${patchedErc20!.poolManager}. Granted no ERC-6909 claims: token debt must come from a real approved account, and native debt must come from call value rather than pre-existing harness funding.`,
+    })),
     ...input.actors.map((address) => ({
       address,
       kind: 'native-balance' as const,
@@ -151,9 +184,13 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
   ]
 
   return {
-    snapshot: { accounts: [poolManagerAccount, ...routerAccounts, ...actorAccounts], blockHashes: [] },
+    snapshot: {
+      accounts: [poolManagerAccount, ...routerAccounts, ...erc20RouterAccounts, ...actorAccounts],
+      blockHashes: [],
+    },
     patched,
+    patchedErc20,
     declaredOverrides,
-    overlaidAccounts: [input.poolManager, ...input.routers, ...input.actors],
+    overlaidAccounts: [input.poolManager, ...input.routers, ...erc20Routers, ...input.actors],
   }
 }

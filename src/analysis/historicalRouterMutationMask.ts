@@ -112,17 +112,6 @@ export function customRouterMutationDistance(mask: CustomRouterMutationMask, can
   return delta === 0n ? 0 : Math.log2(Number(delta) + 1)
 }
 
-/** Dispatches to the validator belonging to the mask's own codec. */
-export function isMaskedDerivative(
-  mask: HistoricalRouterMutationMask,
-  candidate: Hex,
-  officialValidator: (mask: UniswapV4MutationMask, candidate: Hex) => boolean,
-): boolean {
-  return mask.codec === 'official'
-    ? officialValidator(mask, candidate)
-    : isCustomRouterMaskedDerivative(mask, candidate)
-}
-
 /** Dispatches to the distance function belonging to the mask's own codec. */
 export function mutationDistance(mask: HistoricalRouterMutationMask, candidate: Hex): number {
   return mask.codec === 'official'

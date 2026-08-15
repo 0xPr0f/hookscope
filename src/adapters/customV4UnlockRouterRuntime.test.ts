@@ -27,6 +27,18 @@ function deployment(config: string, mutate?: (bytes: Uint8Array) => void): Hex {
 }
 
 describe('custom router runtime template', () => {
+  it('normalizes without relying on the Node Buffer global', () => {
+    const runtime = deployment(CONFIG_A)
+    const original = globalThis.Buffer
+    try {
+      Object.defineProperty(globalThis, 'Buffer', { value: undefined, configurable: true, writable: true })
+      const result = normalizeCustomRouterRuntime(runtime)
+      expect(result).toMatchObject({ ok: true })
+    } finally {
+      Object.defineProperty(globalThis, 'Buffer', { value: original, configurable: true, writable: true })
+    }
+  })
+
   it('normalizes two deployments that differ only in configuration to one hash', () => {
     const owl = normalizeCustomRouterRuntime(deployment(CONFIG_A))
     const hfa = normalizeCustomRouterRuntime(deployment(CONFIG_B))

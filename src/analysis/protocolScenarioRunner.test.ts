@@ -4,7 +4,7 @@ import type { PoolDescriptor } from '../domain/report'
 import { decodeSlot0 } from './protocolScenarioContext'
 import { POOL_EVENT_TOPICS } from './protocolScenarioValidation'
 import { runProtocolScenarios } from './protocolScenarioRunner'
-import type { ForkReplayResult } from './revmProof'
+import type { ForkReplayResult, ForkReplayTransaction } from './revmProof'
 
 const POOL_MANAGER = '0x000000000004444c5dc75cB358380D2e3dE08A90' as Address
 const HOOK = '0x2222222222222222222222222222222222222222' as Address
@@ -86,22 +86,46 @@ const pinnedBlock = { timestamp: 1_000n, baseFeePerGas: 5n, gasLimit: 30_000_000
  * Answers the binding preflight first, then defers to the scenario behavior, so
  * a test only has to describe the scenario it cares about.
  */
-function session(scenarioExecute = vi.fn(async () => replay()), binding = bindingReply) {
+type ScenarioTx = { transaction: ForkReplayTransaction }
+
+function session(
+  scenarioExecute: (input: ScenarioTx) => Promise<ForkReplayResult> = async () => replay(),
+  binding = bindingReply,
+) {
   const close = vi.fn()
   const gasPrices: bigint[] = []
+  const executionModes: (string | undefined)[] = []
   let first = true
-  const execute = vi.fn(async (input: { transaction: { gasPrice: bigint } }) => {
+  const execute = vi.fn(async (input: ScenarioTx) => {
     gasPrices.push(input.transaction.gasPrice)
+    executionModes.push(input.transaction.executionMode)
     if (first) {
       first = false
       return binding()
     }
-    return scenarioExecute()
+    if (input.transaction.to.toLowerCase() === POOL_MANAGER.toLowerCase()
+      && input.transaction.calldata.startsWith('0x6276cbbe')) {
+      return replay(false, {
+        calls: [{
+          caller: input.transaction.caller,
+          target: POOL_MANAGER,
+          bytecodeAddress: POOL_MANAGER,
+          scheme: 'Call',
+          value: '0',
+          inputLength: input.transaction.calldata.length / 2 - 1,
+          selector: '0x6276cbbe' as Hex,
+        }],
+        logs: [],
+        logCount: 0,
+      })
+    }
+    return scenarioExecute(input)
   })
   return {
     execute,
     scenarioExecute,
     gasPrices,
+    executionModes,
     close,
     factory: () => ({ execute, metrics: () => ({ hydratedAccounts: 0, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 4, executions: 0 }), close }),
   }
@@ -135,8 +159,11 @@ describe('generated scenario runner', () => {
     expect(coverage.completed).toBeGreaterThan(20)
     expect(coverage.failed).toBe(0)
     expect(coverage.hydrationReads).toBe(4)
+    // Simulated calls charge no gas, so a real payer's native balance is never
+    // consumed by an observation, and every generated call opts in explicitly.
     expect(spy.gasPrices.length).toBeGreaterThan(1)
-    expect(spy.gasPrices.every((gasPrice) => gasPrice === pinnedBlock.baseFeePerGas)).toBe(true)
+    expect(spy.gasPrices.every((gasPrice) => gasPrice === 0n)).toBe(true)
+    expect(spy.executionModes.every((mode) => mode === 'simulation')).toBe(true)
     expect(spy.close).toHaveBeenCalledTimes(1)
   })
 
@@ -157,7 +184,10 @@ describe('generated scenario runner', () => {
     expect(coverage.completed).toBe(0)
     expect(coverage.outcomes).toHaveLength(1)
     expect(coverage.outcomes[0]).toMatchObject({ scenarioId: 'harness-binding', status: 'failed' })
-    expect(coverage.findings.every((finding) => finding.detectorId === 'protocol-native-scenario-suite')).toBe(true)
+    expect(coverage.findings.map((finding) => finding.detectorId).sort()).toEqual([
+      'hacken-public-pool-suite',
+      'protocol-native-scenario-suite',
+    ])
   })
 
   it('does not report a revert that never reached the PoolManager as hook behavior', async () => {
@@ -175,11 +205,14 @@ describe('generated scenario runner', () => {
       createSession: session(vi.fn(async () => decodeRevert)).factory,
     })
 
-    expect(coverage.reverted).toBe(0)
+    expect(coverage.outcomes.filter((outcome) =>
+      outcome.status === 'reverted' && outcome.scenarioId !== 'initialize:reinitialize')).toHaveLength(0)
     expect(coverage.failed).toBeGreaterThan(0)
     expect(coverage.outcomes.some((outcome) => outcome.reason?.includes('before reaching unlock'))).toBe(true)
     // No observation may be published for a call that never touched the pool.
-    expect(coverage.findings.filter((finding) => finding.detectorId === 'protocol-native-scenario')).toHaveLength(0)
+    expect(coverage.findings.filter((finding) =>
+      finding.detectorId === 'protocol-native-scenario'
+      && finding.technical?.scenarioId !== 'initialize:reinitialize')).toHaveLength(0)
   })
 
   it('refuses a completed swap whose event names a different pool', async () => {
@@ -219,12 +252,16 @@ describe('generated scenario runner', () => {
     const finding = coverage.findings[0]!
     expect(finding.technical!.executionSource).toBe('protocol-native-generated')
     expect(finding.technical!.stateMode).toBe('pinned-block-with-declared-overrides')
+    expect(finding.technical!.calls).toEqual(poolCalls())
     expect(finding.claim).toContain('not an onchain transaction')
     expect(finding.technical).not.toHaveProperty('historicalTransaction')
     expect(finding.subject).toBe(HOOK)
   })
 
   it('records a revert as an observation rather than a failure', async () => {
+    const resolveSelectorSignatures = vi.fn(async () => ({
+      '0x007074c3': [{ name: 'LiquidityFrozen()', hasVerifiedContract: true }],
+    }))
     const coverage = await runProtocolScenarios({
       scanId: 'protocol-test',
       client: client(slot0Word(79_228_162_514_264_337_593_543_950_336n, 0)),
@@ -234,12 +271,18 @@ describe('generated scenario runner', () => {
       stateBlockNumber: 100n,
       pinnedBlock,
       signal: new AbortController().signal,
-      createSession: session(vi.fn(async () => replay(false))).factory,
+      createSession: session(vi.fn(async () => replay(false, { output: '0x007074c3' }))).factory,
+      resolveSelectorSignatures,
     })
 
     expect(coverage.reverted).toBeGreaterThan(0)
     expect(coverage.failed).toBe(0)
     expect(coverage.limitations.join(' ')).toContain('not an analyzer failure')
+    expect(resolveSelectorSignatures).toHaveBeenCalledWith(['0x007074c3'], expect.any(AbortSignal))
+    const manifest = coverage.findings.find((finding) => finding.detectorId === 'protocol-native-scenario-suite')
+    const outcomes = manifest?.technical?.outcomes as { revert?: { signature?: string; summary?: string } }[]
+    expect(outcomes.some((outcome) => outcome.revert?.signature === 'LiquidityFrozen()')).toBe(true)
+    expect(outcomes.find((outcome) => outcome.revert)?.revert?.summary).toContain('Sourcify 4byte')
   })
 
   it('separates an infrastructure failure from a revert', async () => {
@@ -277,6 +320,53 @@ describe('generated scenario runner', () => {
 
     expect(coverage.outcomes.some((o) => o.status === 'unavailable' && o.operation === 'liquidity')).toBe(true)
     expect(coverage.completed).toBeGreaterThan(0)
+  })
+
+  it('attributes a difference to the single input that was varied', async () => {
+    const ALTERNATE_ROUTER = '0x0000000000000000000000000000000000005ce5' as Address
+    // Only runs that went through the second harness instance write a different
+    // slot value. Keyed on the varied input rather than on call ordering, so the
+    // test cannot pass by coincidence of scenario sequence.
+    const perScenario = vi.fn(async (input: ScenarioTx) => {
+      const viaAlternate = input.transaction.to.toLowerCase() === ALTERNATE_ROUTER.toLowerCase()
+      return replay(true, {
+        storageDiffs: [{ address: HOOK, slot: '0x07', before: '0x00', after: viaAlternate ? '0x99' : '0x01' }],
+      })
+    })
+    const coverage = await runProtocolScenarios({
+      scanId: 'protocol-test',
+      client: client(slot0Word(79_228_162_514_264_337_593_543_950_336n, 0)),
+      chainId: 1,
+      poolManager: POOL_MANAGER,
+      pools: [pool],
+      stateBlockNumber: 100n,
+      pinnedBlock,
+      signal: new AbortController().signal,
+      createSession: session(perScenario).factory,
+    })
+
+    const dependence = coverage.findings.filter((finding) => finding.detectorId.startsWith('concrete-'))
+    // Exactly two comparisons: one per single-variable pair. The combined
+    // corner is never compared, because its difference would be unattributable.
+    expect(dependence).toHaveLength(2)
+
+    const sender = dependence.find((finding) => finding.detectorId === 'concrete-hook-sender-dependence')!
+    const caller = dependence.find((finding) => finding.detectorId === 'concrete-transaction-caller-dependence')!
+
+    // The hook-visible sender changed the write; the transaction caller did not.
+    expect(sender.severity).toBe('medium')
+    expect(sender.title).toContain('depends on the hook-visible sender')
+    expect(sender.claim).toContain('0x01 → 0x99')
+    expect(sender.storage).toEqual([{ slot: '0x07', before: '0x01', after: '0x99' }])
+
+    expect(caller.severity).toBe('info')
+    expect(caller.claim).toContain('produced no observable difference')
+
+    for (const finding of dependence) {
+      expect(finding.claim).toContain('differing in one input only')
+      expect(finding.claim).toContain('not a universal property')
+      expect(finding.technical).not.toHaveProperty('historicalTransaction')
+    }
   })
 
   it('runs for a pool that has no historical router reference at all', async () => {

@@ -20,14 +20,18 @@ import {
 } from '../../data/historicalRouterContext'
 import { runProtocolScenarios, type ProtocolScenarioCoverage } from '../../analysis/protocolScenarioRunner'
 import { runProtocolScenarioExploration, type ProtocolExplorationCoverage } from '../../analysis/protocolScenarioExploration'
+import { runErc20LaneCoverage, type Erc20LaneCoverage } from '../../analysis/erc20LaneCoverage'
+import { combinedFindings } from '../../analysis/combinedRules'
 import { scenarioHarnessIdentity } from '../../analysis/protocolScenarioArtifact'
 import { runVerifiedSourceAnalysis, type SourceAnalysisCoverage } from '../../analysis/liveSourceAnalysis'
 import { getChainConfig } from '../../config/chains'
-import { loadScanSources } from '../../data/loadScan'
+import { loadPoolDiscovery, loadScanSources, type PoolDiscoverySnapshot } from '../../data/loadScan'
 import { loadReports, persistCompletedReport } from '../../data/reports'
 import { validateCompletedReportCurrentness, type CompletedReportCurrentness } from '../../data/reportCurrentness'
 import { getPublicClient } from '../../data/rpc'
 import { createForkHydrationCache } from '../../data/forkHydrationCache'
+import { createScanRpcClient } from '../../data/scanRpcClient'
+import { fetchSourcify4ByteSignatures } from '../../data/signatureDatabase'
 import { parseTokenAddress } from '../../domain/address'
 import { currentClientUsesStaticOnlyMobileTier } from '../../domain/executionClient'
 import {
@@ -46,7 +50,7 @@ import {
 } from '../../fixtures/bytecode'
 
 export type AnalyzerState = {
-  status: 'idle' | 'cache' | 'running' | 'completed' | 'cancelled' | 'failed'
+  status: 'idle' | 'discovering' | 'selecting' | 'cache' | 'running' | 'completed' | 'cancelled' | 'failed'
   detail?: string
   progress: number
   phases: AnalysisPhase[]
@@ -55,6 +59,7 @@ export type AnalyzerState = {
   persistence?: 'remote' | 'local-only'
   currentnessStatus?: 'checking' | 'checked'
   currentness?: CompletedReportCurrentness
+  poolSelection?: PoolDiscoverySnapshot
   error?: string
 }
 
@@ -153,6 +158,12 @@ function mergeNodes(resolved: ContractNode[], analyzed: ContractNode[]): Contrac
   })
 }
 
+function samePoolSet(report: AnalysisReport, selectedPoolIds: readonly Hex[]) {
+  if (report.pools.length !== selectedPoolIds.length) return false
+  const expected = new Set(selectedPoolIds.map((poolId) => poolId.toLowerCase()))
+  return report.pools.every((pool) => expected.has(pool.poolId.toLowerCase()))
+}
+
 function revmFinding(proof: RevmExecutionProof, affectedPool?: Hex): Evidence {
   const firstStorage = proof.storageDiffs[0]
   return {
@@ -212,6 +223,33 @@ function explorationFinding(exploration: RevmExploration | undefined, affectedPo
       elapsedMs: exploration.elapsedMs,
       witnesses: exploration.witnesses,
     },
+  }
+}
+
+/**
+ * Status for the generated phase, covering both settlement lanes.
+ *
+ * The claims suite alone decided this before, so an ERC-20 lane that was
+ * unavailable, degraded, or that threw outright still left the phase reading as
+ * completed. A lane that produced nothing has to be visible: it is the
+ * difference between "the token path was exercised" and "it was not".
+ */
+function generatedPhase(
+  claims: ProtocolScenarioCoverage,
+  lane: Erc20LaneCoverage | undefined,
+  laneFailure: string | undefined,
+): Pick<AnalysisPhase, 'status' | 'completed' | 'total' | 'detail'> {
+  const base = protocolScenarioPhase(claims)
+  const laneDetail = laneFailure
+    ? `ERC-20 lane failed · ${laneFailure}`
+    : lane
+      ? `ERC-20 lane: ${lane.completed} settled, ${lane.reverted} reverted, ${lane.coveredByRoundTrip} covered by round trip, ${lane.unavailable} unavailable${lane.failed ? `, ${lane.failed} errored` : ''}`
+      : 'ERC-20 lane did not run'
+  const laneHealthy = Boolean(lane) && lane!.status === 'passed'
+  return {
+    ...base,
+    status: base.status === 'completed' && laneHealthy ? 'completed' : 'degraded',
+    detail: `${base.detail} · ${laneDetail}`,
   }
 }
 
@@ -316,7 +354,93 @@ export function useAnalyzer() {
     }))
   }, [])
 
-  const analyze = useCallback(async (input: { chainId: number; token: string; force?: boolean; poolCursor?: string }) => {
+  const discover = useCallback(async (input: { chainId: number; token: string }) => {
+    abortRef.current?.abort()
+    let token: Address
+    try {
+      token = parseTokenAddress(input.token)
+    } catch (error) {
+      setState({ status: 'failed', progress: 0, phases: basePhases(), history: [], error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+
+    const chain = getChainConfig(input.chainId)
+    const controller = new AbortController()
+    abortRef.current = controller
+    setState({
+      status: 'discovering',
+      detail: 'Pinning a reproducible block',
+      progress: 4,
+      phases: basePhases().map((phase) => phase.id === 'pin' ? { ...phase, status: 'running' } : phase),
+      history: [],
+    })
+
+    try {
+      const isFixture = token.toLowerCase() === FIXTURE_SCAN_ADDRESS.toLowerCase()
+      const selection = isFixture
+        ? (() => {
+            const fixture = syntheticSources()
+            return {
+              chainId: chain.id,
+              token,
+              block: { number: fixture.blockNumber, hash: fixture.blockHash, policy: 'deterministic-fixture' },
+              tokenMetadata: { symbol: 'DEMO', name: 'Hookscope deterministic fixture', decimals: 18 },
+              pools: fixture.pools,
+              discovery: { source: 'logs' as const, requests: 0, completeHistory: true },
+            } satisfies PoolDiscoverySnapshot
+          })()
+        : await loadPoolDiscovery({
+            client: createScanRpcClient({
+              client: getPublicClient(chain),
+              signal: controller.signal,
+              readConcurrency: currentClientUsesStaticOnlyMobileTier() ? 2 : 4,
+              logConcurrency: currentClientUsesStaticOnlyMobileTier() ? 1 : 2,
+            }).client,
+            chain,
+            token,
+            signal: controller.signal,
+            onProgress: (detail) => setState((current) => ({
+              ...current,
+              detail,
+              progress: detail.startsWith('Loading') ? 14 : current.progress,
+              phases: current.phases.map((phase) => phase.id === 'discover' && detail.startsWith('Loading')
+                ? { ...phase, status: 'running' }
+                : phase),
+            })),
+          })
+      if (controller.signal.aborted) return
+      const history = await loadReports(chain.id, token)
+      const discoveryDetail = selection.discovery.source === 'index+tail'
+        ? `${selection.pools.length} pools · index verified + recent tail · ${selection.discovery.requests} reads`
+        : `${selection.pools.length} pools · bounded log discovery · ${selection.discovery.requests} reads`
+      setState({
+        status: 'selecting',
+        detail: selection.pools.length > 0 ? 'Choose pools to analyze' : 'No verified v4 pools found',
+        progress: 25,
+        phases: basePhases().map((phase) => {
+          if (phase.id === 'pin') return { ...phase, status: 'completed', completed: 1, detail: `Block ${selection.block.number}` }
+          if (phase.id === 'discover') return { ...phase, status: 'completed', completed: 1, detail: discoveryDetail }
+          return phase
+        }),
+        history,
+        poolSelection: selection,
+      })
+      abortRef.current = null
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      setState((current) => ({ ...current, status: 'failed', error: error instanceof Error ? error.message : String(error), detail: undefined }))
+      abortRef.current = null
+    }
+  }, [])
+
+  const analyze = useCallback(async (input: {
+    chainId: number
+    token: string
+    force?: boolean
+    poolCursor?: string
+    poolSelection?: PoolDiscoverySnapshot
+    selectedPoolIds?: readonly Hex[]
+  }) => {
     abortRef.current?.abort()
     let token: Address
     try {
@@ -328,13 +452,27 @@ export function useAnalyzer() {
 
     const chain = getChainConfig(input.chainId)
     const isFixture = token.toLowerCase() === FIXTURE_SCAN_ADDRESS.toLowerCase()
+    if (input.poolSelection && (
+      input.poolSelection.chainId !== chain.id
+      || input.poolSelection.token.toLowerCase() !== token.toLowerCase()
+    )) {
+      setState({ status: 'failed', progress: 0, phases: basePhases(), history: [], error: 'The pool selection belongs to a different chain or token.' })
+      return
+    }
+    if (input.poolSelection && (!input.selectedPoolIds || input.selectedPoolIds.length === 0)) {
+      setState({ status: 'failed', progress: 0, phases: basePhases(), history: [], error: 'Select at least one pool to analyze.' })
+      return
+    }
     setState({ status: 'cache', detail: 'Checking completed reports', progress: 0, phases: basePhases(), history: [] })
     const cached = await loadReports(chain.id, token)
-    const newest = cached[0]
+    const newest = input.selectedPoolIds
+      ? cached.find((report) => samePoolSet(report, input.selectedPoolIds!))
+      : cached[0]
+    const history = newest ? cached.filter((report) => report.id !== newest.id) : cached
     const cacheMatchesCurrentPipeline = newest ? reportMatchesCurrentPipeline(newest, isFixture) : false
     if (newest && cacheMatchesCurrentPipeline && !input.force && !input.poolCursor) {
       if (newest.blockTagPolicy === 'deterministic-fixture') {
-        setState({ status: 'completed', progress: 100, phases: newest.phases, report: newest, history: cached.slice(1) })
+        setState({ status: 'completed', progress: 100, phases: newest.phases, report: newest, history })
         return
       }
       const currentnessController = new AbortController()
@@ -345,7 +483,7 @@ export function useAnalyzer() {
         detail: 'Checking saved report against current chain state',
         phases: newest.phases,
         report: newest,
-        history: cached.slice(1),
+        history,
         currentnessStatus: 'checking',
       })
       try {
@@ -385,7 +523,7 @@ export function useAnalyzer() {
     abortRef.current = controller
     const startedAt = performance.now()
     const scanId = crypto.randomUUID()
-    setState({ status: 'running', detail: 'Pinning execution context', progress: 4, phases: basePhases(), history: cached })
+    setState({ status: 'running', detail: 'Preparing selected pools', progress: 25, phases: basePhases(), history: cached, poolSelection: input.poolSelection })
 
     try {
       let subjects: StaticSubject[]
@@ -399,20 +537,35 @@ export function useAnalyzer() {
       let hasMore = false
       let nextCursor: string | undefined
       let tokenSymbol: string | undefined
+      let scanClient: PublicClient | undefined
       let pinDetail: string
       let discoveryDetail: string
       let resolveDetail: string
       patchPhase('pin', { status: 'running' })
       if (isFixture) {
         const fixture = syntheticSources()
-        subjects = fixture.subjects
-        pools = fixture.pools
-        preResolvedNodes = fixture.nodes
+        const requested = input.selectedPoolIds
+          ? new Set(input.selectedPoolIds.map((poolId) => poolId.toLowerCase()))
+          : undefined
+        pools = requested
+          ? fixture.pools.filter((pool) => requested.has(pool.poolId.toLowerCase()))
+          : fixture.pools
+        if (requested && pools.length !== requested.size) throw new Error('One or more selected fixture pools were not found.')
+        const selectedAddresses = new Set([
+          FIXTURE_SCAN_ADDRESS.toLowerCase(),
+          ...pools.map((pool) => pool.hook.toLowerCase()),
+        ])
+        subjects = fixture.subjects.filter((subject) => selectedAddresses.has(subject.address.toLowerCase()))
+        preResolvedNodes = fixture.nodes.filter((node) => selectedAddresses.has(node.address.toLowerCase()))
         blockNumber = fixture.blockNumber
         blockHash = fixture.blockHash
         blockPolicy = 'deterministic-fixture'
-        limitations = fixture.limitations
-        discovered = pools.length
+        limitations = [
+          ...fixture.limitations,
+          pools.length < fixture.pools.length ? `This report covers ${pools.length} user-selected pool${pools.length === 1 ? '' : 's'} out of ${fixture.pools.length} discovered pools.` : '',
+        ].filter(Boolean)
+        discovered = fixture.pools.length
+        hasMore = pools.length < discovered
         tokenSymbol = 'DEMO'
         pinDetail = `Block ${blockNumber} · deterministic fixture`
         discoveryDetail = `${pools.length} deterministic pools`
@@ -421,12 +574,21 @@ export function useAnalyzer() {
         patchPhase('discover', { status: 'completed', completed: 1, detail: discoveryDetail })
         patchPhase('resolve', { status: 'completed', completed: 1, detail: resolveDetail })
       } else {
-        const client = getPublicClient(chain)
+        const coordinated = createScanRpcClient({
+          client: getPublicClient(chain),
+          signal: controller.signal,
+          readConcurrency: currentClientUsesStaticOnlyMobileTier() ? 2 : 4,
+          logConcurrency: currentClientUsesStaticOnlyMobileTier() ? 1 : 2,
+        })
+        const client = coordinated.client
+        scanClient = client
         const sources = await loadScanSources({
           client,
           chain,
           token,
           poolCursor: input.poolCursor,
+          discoverySnapshot: input.poolSelection,
+          selectedPoolIds: input.selectedPoolIds,
           poolLimit: 20,
           signal: controller.signal,
           onProgress: (detail) => setState((current) => ({ ...current, detail })),
@@ -499,8 +661,12 @@ export function useAnalyzer() {
       let liveRouterScenarios: LiveRouterScenarioCoverage | undefined
       let liveForkExploration: LiveForkExplorationCoverage | undefined
       let routerContexts: HistoricalRouterContexts | undefined
+      let routerContextFailure: string | undefined
       let protocolScenarios: ProtocolScenarioCoverage | undefined
       let protocolExploration: ProtocolExplorationCoverage | undefined
+      let erc20Lane: Erc20LaneCoverage | undefined
+      /** Why the ERC-20 lane produced nothing, when it threw rather than reporting. */
+      let erc20LaneFailure: string | undefined
       let pinnedBlockContext: { timestamp: bigint; baseFeePerGas: bigint | null; gasLimit: bigint; miner: Address } | undefined
       let historicalReplayFailure = 'Historical replay did not run.'
       let generatedFailure: string | undefined
@@ -610,7 +776,7 @@ export function useAnalyzer() {
           detail: `${exploration.coverageEdges} execution edges · ${exploration.elapsedMs} ms`,
         })
       } else if (!mobile && chain.deepExecution && chain.poolManager && pools.length > 0) {
-        const client = getPublicClient(chain)
+        const client = scanClient ?? createScanRpcClient({ client: getPublicClient(chain), signal: controller.signal }).client
         const hydrationCache = createForkHydrationCache(client)
         const poolManager = chain.poolManager
         const workerBudget = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1))
@@ -671,6 +837,7 @@ export function useAnalyzer() {
           } catch (error) {
             if (controller.signal.aborted) throw error
             // Recognition is optional: exact replay stands without it.
+            routerContextFailure = error instanceof Error ? error.message : String(error)
             routerContexts = undefined
           }
         }
@@ -700,6 +867,7 @@ export function useAnalyzer() {
               ...options,
               loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
             }),
+            resolveSelectorSignatures: (selectors, signal) => fetchSourcify4ByteSignatures(selectors, signal),
             onProgress: (completed, total, detail) => {
               patchPhase('generated', { status: 'running', completed, total, detail })
               setState((current) => ({ ...current, detail: `Generated scenarios · ${detail}` }))
@@ -716,6 +884,48 @@ export function useAnalyzer() {
           if (controller.signal.aborted) throw error
           generatedFailure = error instanceof Error ? error.message : String(error)
           patchPhase('generated', { status: 'degraded', detail: `Generated scenarios unavailable · ${generatedFailure}` })
+        }
+
+        // 2b. The ERC-20 settlement lane, run beside the claims baseline.
+        //
+        //     Token-funded cases use a verified historical holder. Native-first
+        //     cases use the bounded synthetic actor and need no token-specific
+        //     mapping or historical holder before buying through the real pool.
+        if (protocolScenarios?.contexts.length) {
+          patchPhase('generated', { status: 'running', detail: 'Settling generated scenarios through the real token path' })
+          try {
+            erc20Lane = await runErc20LaneCoverage({
+              scanId,
+              contexts: protocolScenarios.contexts,
+              claimsOutcomes: protocolScenarios.outcomes,
+              replay: liveReplay,
+              readPayerCode: async (address, stateBlockNumber) => {
+                const update = await hydrationCache.load(stateBlockNumber, { kind: 'account', address })
+                return update.kind === 'account' && update.account.exists ? update.account.code : undefined
+              },
+              signal: controller.signal,
+              createSession: (options) => new ForkExecutionSession({
+                scanId: options.scanId,
+                client,
+                stateBlockNumber: options.stateBlockNumber,
+                snapshot: options.snapshot,
+                loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
+              }),
+              onProgress: (completed, total, detail) => {
+                patchPhase('generated', { status: 'running', completed, total, detail })
+                setState((current) => ({ ...current, detail: `ERC-20 settlement lane · ${detail}` }))
+              },
+            })
+            patchPhase('generated', generatedPhase(protocolScenarios, erc20Lane, undefined))
+          } catch (error) {
+            if (controller.signal.aborted) throw error
+            // The claims baseline stands, so this must not retract it — but the
+            // fault is recorded rather than swallowed, or the phase would look
+            // clean while a whole lane silently produced nothing.
+            erc20LaneFailure = error instanceof Error ? error.message : String(error)
+            erc20Lane = undefined
+            patchPhase('generated', generatedPhase(protocolScenarios, undefined, erc20LaneFailure))
+          }
         }
 
         // 3. Historical-router variants. Extra evidence layered on a replay that
@@ -748,7 +958,9 @@ export function useAnalyzer() {
             detail: phaseCoverageDetail(
               `${liveRouterScenarios.executions} router → PoolManager scenarios · ${liveRouterScenarios.hydrationReads} logical pinned reads · ${hydrationCache.metrics().hits} reads reused · ${liveRouterScenarios.positionLookups.resolved}/${liveRouterScenarios.positionLookups.reads} position lookups`,
               liveRouterScenarios.status,
-              liveRouterScenarios.limitations,
+              routerContextFailure
+                ? [`Historical router recognition failed: ${routerContextFailure}`, ...liveRouterScenarios.limitations]
+                : liveRouterScenarios.limitations,
             ),
           })
         } else {
@@ -821,6 +1033,23 @@ export function useAnalyzer() {
 
       const completedAt = new Date().toISOString()
       const harness = scenarioHarnessIdentity()
+
+      // Joined evidence, computed last because every rule needs the layers below
+      // it. A rule fires only when its stated requirements are all met, so an
+      // empty result means the evidence did not support a joined claim.
+      const layeredFindings: Evidence[] = [
+        ...staticResult.findings,
+        ...(sourceCoverage?.findings ?? []),
+        ...(protocolScenarios?.findings ?? []),
+        ...(liveRouterScenarios?.findings ?? []),
+      ]
+      const combined = [...new Map(
+        subjects.map((item) => [item.address.toLowerCase(), item.address]),
+      ).values()].flatMap((address) => combinedFindings({
+        subject: address,
+        affectedPools: pools.map((item) => item.poolId),
+        findings: layeredFindings.filter((finding) => finding.subject.toLowerCase() === address.toLowerCase()),
+      }))
       const finalPhases = basePhases().map((phase) => {
         if (phase.id === 'static') return {
           ...phase,
@@ -847,7 +1076,9 @@ export function useAnalyzer() {
             liveReplay.limitations,
           ),
         }
-        if (phase.id === 'generated' && protocolScenarios) return { ...phase, ...protocolScenarioPhase(protocolScenarios) }
+        if (phase.id === 'generated' && protocolScenarios) {
+          return { ...phase, ...generatedPhase(protocolScenarios, erc20Lane, erc20LaneFailure) }
+        }
         if (phase.id === 'generated' && !isFixture) return {
           ...phase,
           status: 'degraded' as const,
@@ -862,7 +1093,9 @@ export function useAnalyzer() {
           detail: phaseCoverageDetail(
             `${liveRouterScenarios.executions} router → PoolManager scenarios · ${liveRouterScenarios.hydrationReads} logical pinned reads · ${liveRouterScenarios.positionLookups.resolved}/${liveRouterScenarios.positionLookups.reads} position lookups`,
             liveRouterScenarios.status,
-            liveRouterScenarios.limitations,
+            routerContextFailure
+              ? [`Historical router recognition failed: ${routerContextFailure}`, ...liveRouterScenarios.limitations]
+              : liveRouterScenarios.limitations,
           ),
         }
         if (phase.id === 'fuzz' && exploration) return { ...phase, status: 'completed' as const, completed: exploration.executions, total: 30_000, detail: `${exploration.coverageEdges} execution edges · ${exploration.elapsedMs} ms` }
@@ -902,12 +1135,15 @@ export function useAnalyzer() {
           evmole: '0.9.3',
           revm: '36.0.0',
           solc: sourceCoverage?.compilerVersions.join(',') || 'not-run',
-          sourceRules: '0.1.0',
+          sourceRules: '0.2.0',
           hackenPort: hackenSuite?.version ?? 'not-run',
+          hackenPublicPort: protocolScenarios?.publicHackenVersion ?? 'not-run',
           inputExplorer: exploration?.strategy ?? liveForkExploration?.strategy ?? 'libafl-worker-fanout-corpus-exchange/0.2.0',
-          rules: '0.2.0',
+          rules: '0.3.0',
           generatedScenarios: protocolScenarios?.version ?? 'not-run',
+          erc20SettlementLane: erc20Lane?.version ?? 'not-run',
           generatedExplorer: protocolExploration?.strategy ?? 'not-run',
+          signatureResolver: protocolScenarios ? 'sourcify-4byte/v1' : 'not-run',
           ...(protocolScenarios || protocolExploration
             ? {
                 scenarioHarness: `${harness.contract}@${harness.templateHash}`,
@@ -932,9 +1168,20 @@ export function useAnalyzer() {
                 : { supported: true, status: 'degraded', reason: liveReplay.limitations.join(' ') || 'Historical replay coverage was incomplete.' }
             : { supported: false, status: 'degraded', reason: executionReason },
           generated: protocolScenarios
-            ? protocolScenarios.status === 'passed'
+            ? protocolScenarios.status === 'passed' && erc20Lane?.status === 'passed'
               ? { supported: true, status: 'passed', verifiedAt: completedAt }
-              : { supported: true, status: 'degraded', reason: protocolScenarios.limitations[0] ?? 'Generated scenario coverage was incomplete.' }
+              : {
+                  supported: true,
+                  status: 'degraded',
+                  // Names whichever lane actually fell short, so "degraded" is
+                  // never an unexplained label.
+                  reason: protocolScenarios.status !== 'passed'
+                    ? protocolScenarios.limitations[0] ?? 'Generated scenario coverage was incomplete.'
+                    : erc20LaneFailure
+                      ? `The ERC-20 settlement lane failed: ${erc20LaneFailure}`
+                      : erc20Lane?.limitations[0]
+                        ?? 'The ERC-20 settlement lane did not run, so only ERC-6909 claims settlement was exercised.',
+                }
             : { supported: false, status: 'degraded', reason: generatedFailure ?? executionReason },
           fuzz: exploration
             ? { supported: true, status: 'passed', verifiedAt: completedAt }
@@ -961,10 +1208,12 @@ export function useAnalyzer() {
           ...hackenEvidence,
           ...(liveReplay?.findings ?? []),
           ...(protocolScenarios?.findings ?? []),
+          ...(erc20Lane?.findings ?? []),
           ...(liveRouterScenarios?.findings ?? []),
           ...(protocolExploration?.findings ?? []),
           ...(liveForkExploration?.findings ?? []),
           ...(exploredFinding ? [exploredFinding] : []),
+          ...combined,
         ],
         phases: finalPhases,
         scenarios: hackenSuite
@@ -978,18 +1227,22 @@ export function useAnalyzer() {
         coverage: {
           uniqueCodeHashes: subjects.length,
           paths: staticResult.paths,
-          executions: (executionProof ? 1 : 0) + (liveReplay?.passedTransactions ?? 0) + (liveRouterScenarios?.executions ?? 0) + (hackenSuite?.executions ?? 0) + (exploration?.executions ?? 0) + (liveForkExploration?.executions ?? 0) + (protocolScenarios?.completed ?? 0) + (protocolExploration?.executions ?? 0),
+          executions: (executionProof ? 1 : 0) + (liveReplay?.passedTransactions ?? 0) + (liveRouterScenarios?.executions ?? 0) + (hackenSuite?.executions ?? 0) + (exploration?.executions ?? 0) + (liveForkExploration?.executions ?? 0) + (protocolScenarios?.completed ?? 0) + (protocolExploration?.executions ?? 0) + (erc20Lane?.completed ?? 0),
           branches: staticResult.branches,
         },
         limitations: [
           ...limitations,
+          ...(staticResult.limitations ?? []),
           ...(isFixture && !mobile
             ? ['This deterministic example validates the browser engines; public-chain fork execution still requires per-chain conformance.']
             : liveReplay || protocolScenarios || protocolExploration
               ? [
                   ...(liveReplay?.limitations ?? [`Historical replay did not run · ${historicalReplayFailure}`]),
                   ...(routerContexts?.limitations ?? []),
+                  ...(routerContextFailure ? [`Historical router recognition failed: ${routerContextFailure}`] : []),
                   ...(protocolScenarios?.limitations ?? []),
+                  ...(erc20Lane?.limitations ?? []),
+                  ...(erc20LaneFailure ? [`The ERC-20 settlement lane failed and produced no token-path evidence: ${erc20LaneFailure}`] : []),
                   ...(liveRouterScenarios?.limitations ?? []),
                   ...(protocolExploration?.limitations ?? []),
                   ...(liveForkExploration?.limitations ?? []),
@@ -1009,5 +1262,5 @@ export function useAnalyzer() {
     }
   }, [patchPhase])
 
-  return { state, analyze, cancel }
+  return { state, discover, analyze, cancel }
 }

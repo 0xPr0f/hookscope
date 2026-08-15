@@ -6,8 +6,9 @@ import {
   type PublicClient,
 } from 'viem'
 import type { ChainConfig } from '../config/chains'
+import { runtimeRpcUrls } from './rpcPreferences'
 
-const clients = new Map<number, PublicClient>()
+const clients = new Map<number, { endpoints: string; client: PublicClient }>()
 
 /**
  * Errors that mean "this endpoint cannot serve the request", not "the request is
@@ -49,10 +50,10 @@ const RETRY_ON_NEXT_ENDPOINT = [
  * True when another endpoint deserves a try rather than surfacing this error.
  *
  * Two signals, because providers disagree on how to report the same condition.
- * Any HTTP status at or above 400 is the endpoint refusing the request rather
- * than the chain answering it, so it always warrants rotation; a chain that
- * genuinely rejects a call answers 200 with a JSON-RPC error. The message list
- * then covers providers that return 200 with a capability complaint.
+ * Transient HTTP statuses rotate immediately. Generic 400/403 responses rotate
+ * only when their message identifies an archive, routing, capacity, or access
+ * limitation; otherwise duplicating a malformed request across every endpoint
+ * merely increases load and hides the actual error.
  *
  * Capability is per method, not per endpoint: a provider can serve historical
  * `eth_getCode` and still refuse historical `eth_getLogs`, so no static ordering
@@ -62,7 +63,7 @@ export function isEndpointCapabilityError(error: Error): boolean {
   const parts: string[] = []
   for (let current: unknown = error, depth = 0; current && depth < 5; depth++) {
     const node = current as { message?: string; details?: string; status?: number; cause?: unknown }
-    if (typeof node.status === 'number' && node.status >= 400) return true
+    if (node.status === 408 || node.status === 425 || node.status === 429 || (typeof node.status === 'number' && node.status >= 500)) return true
     if (node.message) parts.push(node.message)
     if (node.details) parts.push(node.details)
     current = node.cause
@@ -71,7 +72,7 @@ export function isEndpointCapabilityError(error: Error): boolean {
   return RETRY_ON_NEXT_ENDPOINT.some((needle) => message.includes(needle))
 }
 
-function toViemChain(config: ChainConfig): Chain {
+export function toViemChain(config: ChainConfig): Chain {
   return {
     id: config.id,
     name: config.name,
@@ -86,13 +87,15 @@ function toViemChain(config: ChainConfig): Chain {
 }
 
 export function getPublicClient(config: ChainConfig): PublicClient {
+  const rpcUrls = runtimeRpcUrls(config)
+  const endpointIdentity = rpcUrls.join('\n')
   const existing = clients.get(config.id)
-  if (existing) return existing
-  if (config.rpcUrls.length === 0) throw new Error(`No browser RPC is configured for ${config.name}.`)
+  if (existing?.endpoints === endpointIdentity) return existing.client
+  if (rpcUrls.length === 0) throw new Error(`No browser RPC is configured for ${config.name}.`)
   const client = createPublicClient({
     chain: toViemChain(config),
     transport: fallback(
-      config.rpcUrls.map((url) => http(url, {
+      rpcUrls.map((url) => http(url, {
         timeout: 15_000,
         retryCount: 1,
         // Account hydration asks for balance, nonce, and code together. JSON-RPC
@@ -104,6 +107,11 @@ export function getPublicClient(config: ChainConfig): PublicClient {
     ),
     batch: { multicall: true },
   })
-  clients.set(config.id, client)
+  clients.set(config.id, { endpoints: endpointIdentity, client })
   return client
+}
+
+export function resetPublicClient(chainId?: number) {
+  if (chainId === undefined) clients.clear()
+  else clients.delete(chainId)
 }

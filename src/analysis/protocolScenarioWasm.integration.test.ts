@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { encodeFunctionData, parseAbi, type Address, type Hex } from 'viem'
-import type { RevmCallEvidence } from './revmProof'
+import {
+  serializeForkReplayTransaction,
+  type ForkReplayBlock,
+  type ForkReplayResult,
+  type RevmCallEvidence,
+} from './revmProof'
 import {
   create_fork_session,
   dispose_fork_session,
@@ -13,6 +18,7 @@ import { buildScenarioStateOverlay } from './protocolScenarioState'
 import { buildProtocolScenarioMatrix } from './protocolNativeScenarios'
 import { deriveScenarioMutationMask, isScenarioDerivative } from './protocolScenarioMask'
 import { selectExplorationSeeds } from './protocolScenarioExploration'
+import { runErc20RoundTrip } from './erc20RoundTrip'
 
 /**
  * Proves the generated-scenario path end to end in the real browser engine.
@@ -26,6 +32,7 @@ import { selectExplorationSeeds } from './protocolScenarioExploration'
 
 const ROUTER = '0x00000000000000000000000000000000000f0000' as Address
 const ACTOR = '0x00000000000000000000000000000000000ac701' as Address
+const NATIVE = '0x0000000000000000000000000000000000000000' as Address
 
 // Uniswap's canonical price bounds; a swap must stay inside them.
 const MIN_SQRT_PRICE_PLUS_ONE = 4_295_128_740n
@@ -36,6 +43,21 @@ const RUN_ABI = parseAbi([
   'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
   'function run(Step[] steps) returns (int256[] deltas)',
 ])
+const BALANCE_ABI = parseAbi(['function balanceOf(address owner) view returns (uint256)'])
+const INITIALIZE_ABI = parseAbi([
+  'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
+  'function initialize(PoolKey key, uint160 sqrtPriceX96) returns (int24 tick)',
+])
+
+const FIXTURE_BLOCK: ForkReplayBlock = {
+  number: 2n,
+  beneficiary: NATIVE,
+  timestamp: 1_700_000_000n,
+  gasLimit: 30_000_000n,
+  baseFee: 1_000_000_000n,
+  difficulty: 0n,
+  prevrandao: `0x${'0'.repeat(64)}` as Hex,
+}
 
 function swapCalldata(input: { zeroForOne: boolean; amountSpecified: bigint; hookData: Hex }): Hex {
   return encodeFunctionData({
@@ -98,7 +120,88 @@ function snapshotWithHarness(router: Address = ROUTER) {
       storageComplete: account.storageComplete,
     }
   })
+  return {
+    snapshot: {
+      ...base,
+      accounts: [...accounts, ...overridden.values()].map((account) =>
+        account.address.toLowerCase() === ACTOR.toLowerCase()
+          ? { ...account, nonce: 7 }
+          : account),
+    },
+    overlay,
+  }
+}
+
+/** Injects both settlement harnesses while retaining the complete Foundry state. */
+function snapshotWithErc20Harness(actor: Address = HACKEN_FIXTURE_CONTEXT.actor) {
+  const base = hackenFixtureSnapshot()
+  const manager = base.accounts.find(
+    (account) => account.address.toLowerCase() === HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase(),
+  )
+  expect(manager, 'fixture must contain the PoolManager account').toBeTruthy()
+
+  const overlay = buildScenarioStateOverlay({
+    poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
+    poolManagerAccount: { balance: manager!.balance, nonce: manager!.nonce, code: manager!.code },
+    routers: [ROUTER],
+    // ScenarioHook permits this address. Replacing only its runtime leaves the
+    // actor's real token allowance to the same spender valid.
+    erc20Routers: [HACKEN_FIXTURE_CONTEXT.swapRouter],
+    actors: [actor],
+    currencies: [HACKEN_FIXTURE_CONTEXT.nativeCurrency0, HACKEN_FIXTURE_CONTEXT.nativeCurrency1],
+  })
+
+  const overridden = new Map(overlay.snapshot.accounts.map((account) => [account.address.toLowerCase(), account]))
+  const accounts = base.accounts.map((account) => {
+    const replacement = overridden.get(account.address.toLowerCase())
+    if (!replacement) return account
+    overridden.delete(account.address.toLowerCase())
+    return {
+      ...account,
+      ...replacement,
+      storage: { ...account.storage, ...replacement.storage },
+      storageComplete: account.storageComplete,
+    }
+  })
   return { snapshot: { ...base, accounts: [...accounts, ...overridden.values()] }, overlay }
+}
+
+function directForkSession(sessionId: string, snapshot: ReturnType<typeof snapshotWithErc20Harness>['snapshot']) {
+  create_fork_session(sessionId, snapshot)
+  return {
+    async execute(input: {
+      transaction: Parameters<typeof serializeForkReplayTransaction>[0]
+      block: ForkReplayBlock
+      commit?: boolean
+    }): Promise<ForkReplayResult> {
+      const step = inspect_fork_session(
+        sessionId,
+        serializeForkReplayTransaction(input.transaction),
+        {
+          number: Number(input.block.number),
+          beneficiary: input.block.beneficiary,
+          timestamp: `0x${input.block.timestamp.toString(16)}`,
+          gasLimit: Number(input.block.gasLimit),
+          baseFee: Number(input.block.baseFee),
+          difficulty: `0x${input.block.difficulty.toString(16)}`,
+          prevrandao: input.block.prevrandao,
+        },
+        input.commit ?? false,
+      )
+      if (step.status !== 'complete') {
+        throw new Error(`fixture fork step ${step.status}: ${step.message ?? JSON.stringify(step.request)}`)
+      }
+      return {
+        proof: step.proof,
+        hydrationRequests: 0,
+        hydratedAccounts: 0,
+        hydratedStorageSlots: 0,
+      }
+    },
+    close() {
+      dispose_fork_session(sessionId)
+    },
+  }
 }
 
 function runScenario(
@@ -111,24 +214,25 @@ function runScenario(
   try {
     return inspect_fork_session(
       sessionId,
-      {
+      serializeForkReplayTransaction({
+        executionMode: 'simulation',
         caller: ACTOR,
         to: router,
         calldata,
-        value: '0x0',
+        value: 0n,
         // EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks.
-        gasLimit: 16_000_000,
-        gasPrice: '0x0',
+        gasLimit: 16_000_000n,
+        gasPrice: 0n,
         nonce: 0,
         chainId: HACKEN_FIXTURE_CONTEXT.chainId,
         traceLimit: 4_096,
-      },
+      }),
       {
         number: 2,
         beneficiary: '0x0000000000000000000000000000000000000000',
         timestamp: '0x6553f100',
         gasLimit: 30_000_000,
-        baseFee: 0,
+        baseFee: 1_000_000_000,
         difficulty: '0x0',
         prevrandao: `0x${'0'.repeat(64)}`,
       },
@@ -162,6 +266,91 @@ describe('generated PoolManager scenarios in browser revm', () => {
     expect(targets).toContain(HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase())
     expect(targets).toContain(HACKEN_FIXTURE_CONTEXT.hook.toLowerCase())
     expect(overlay.patched.poolManager).toBe(HACKEN_FIXTURE_CONTEXT.poolManager)
+  })
+
+  it('replays the portable reinitialization case directly against the deployed PoolManager', () => {
+    ready()
+    const { snapshot } = snapshotWithHarness()
+    const calldata = encodeFunctionData({
+      abi: INITIALIZE_ABI,
+      functionName: 'initialize',
+      args: [{
+        currency0: HACKEN_FIXTURE_CONTEXT.currency0,
+        currency1: HACKEN_FIXTURE_CONTEXT.currency1,
+        fee: HACKEN_FIXTURE_CONTEXT.fee,
+        tickSpacing: HACKEN_FIXTURE_CONTEXT.tickSpacing,
+        hooks: HACKEN_FIXTURE_CONTEXT.hook,
+      }, HACKEN_FIXTURE_CONTEXT.sqrtPriceX96],
+    })
+    const step = runScenario(
+      'protocol-reinitialize-path',
+      snapshot,
+      calldata,
+      HACKEN_FIXTURE_CONTEXT.poolManager,
+    )
+
+    expect(step.status, `fork step failed: ${step.message ?? ''}`).toBe('complete')
+    expect(step.proof.success).toBe(false)
+    expect(step.proof.calls.some((call: RevmCallEvidence) =>
+      call.target.toLowerCase() === HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase()
+      && call.selector === '0x6276cbbe')).toBe(true)
+  })
+
+  it('serializes delegatecall code, storage context and exact write frame separately', () => {
+    ready()
+    const caller = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' as Address
+    const storageAddress = '0xffffffffffffffffffffffffffffffffffffffff' as Address
+    const implementation = '0x1111111111111111111111111111111111111111' as Address
+    const sessionId = 'delegate-frame-semantics'
+    create_fork_session(sessionId, {
+      accounts: [
+        { address: caller, exists: true, balance: '0xffffffffffffffff', nonce: 0, code: '0x', storage: {}, storageComplete: true },
+        {
+          address: storageAddress,
+          exists: true,
+          balance: '0xffffffffffffffff',
+          nonce: 0,
+          code: `0x600060006000600073${implementation.slice(2)}5af400`,
+          storage: {},
+          storageComplete: true,
+        },
+        { address: implementation, exists: true, balance: '0x0', nonce: 0, code: '0x600160005500', storage: {}, storageComplete: true },
+        { address: NATIVE, exists: true, balance: '0x0', nonce: 0, code: '0x', storage: {}, storageComplete: true },
+      ],
+      blockHashes: [],
+    })
+    try {
+      const step = inspect_fork_session(
+        sessionId,
+        serializeForkReplayTransaction({
+          executionMode: 'simulation', caller, to: storageAddress, calldata: '0x', value: 0n,
+          gasLimit: 2_000_000n, gasPrice: 0n, nonce: 0, chainId: 1,
+        }),
+        {
+          number: 1, beneficiary: NATIVE, timestamp: '0x1', gasLimit: 30_000_000,
+          baseFee: 0, difficulty: '0x0', prevrandao: `0x${'0'.repeat(64)}`,
+        },
+        false,
+      )
+      expect(step.status).toBe('complete')
+      const delegated = step.proof.calls.find((call: RevmCallEvidence) => call.scheme === 'DelegateCall')
+      expect(delegated).toMatchObject({
+        caller,
+        target: storageAddress,
+        bytecodeAddress: implementation,
+        depth: 1,
+      })
+      expect(delegated!.frameId).toBeTypeOf('number')
+      const write = step.proof.storageOperations.find((operation: { opcode: string }) => operation.opcode === 'SSTORE')
+      expect(write).toMatchObject({
+        frameId: delegated!.frameId,
+        address: implementation,
+        storageAddress,
+      })
+      expect(step.proof.storageDiffs).toContainEqual(expect.objectContaining({ address: storageAddress }))
+    } finally {
+      dispose_fork_session(sessionId)
+    }
   })
 
   it('records a hook router policy as an observed revert, not an analyzer failure', () => {
@@ -296,5 +485,140 @@ describe('generated PoolManager scenarios in browser revm', () => {
     )
     expect(step.status).toBe('complete')
     expect(step.proof.success, `hookData swap reverted: ${step.proof.output}`).toBe(true)
+  })
+
+  it('carries exact native output into a real-token reverse leg in browser revm', async () => {
+    ready()
+    const { snapshot, overlay } = snapshotWithErc20Harness()
+    expect(overlay.patchedErc20).toBeTruthy()
+    const session = directForkSession('erc20-native-round-trip', snapshot)
+    const actor = HACKEN_FIXTURE_CONTEXT.actor
+    const token = HACKEN_FIXTURE_CONTEXT.nativeCurrency1
+
+    const readBalance = async (currency: Address, owner: Address) => {
+      expect(currency).not.toBe(NATIVE)
+      const result = await session.execute({
+        transaction: {
+          executionMode: 'simulation',
+          caller: owner,
+          to: currency,
+          calldata: encodeFunctionData({ abi: BALANCE_ABI, functionName: 'balanceOf', args: [owner] }),
+          value: 0n,
+          gasLimit: 200_000n,
+          gasPrice: 0n,
+          nonce: 0,
+          chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+          traceLimit: 64,
+        },
+        block: FIXTURE_BLOCK,
+      })
+      expect(result.proof.success).toBe(true)
+      return BigInt(result.proof.output.slice(0, 66))
+    }
+
+    try {
+      const result = await runErc20RoundTrip({
+        session,
+        readBalance,
+        poolKey: {
+          currency0: HACKEN_FIXTURE_CONTEXT.nativeCurrency0,
+          currency1: token,
+          fee: HACKEN_FIXTURE_CONTEXT.fee,
+          tickSpacing: HACKEN_FIXTURE_CONTEXT.tickSpacing,
+          hooks: HACKEN_FIXTURE_CONTEXT.hook,
+        },
+        poolId: HACKEN_FIXTURE_CONTEXT.nativePoolId,
+        hook: HACKEN_FIXTURE_CONTEXT.hook,
+        poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
+        harness: HACKEN_FIXTURE_CONTEXT.swapRouter,
+        payer: actor,
+        inputToken: token,
+        block: FIXTURE_BLOCK,
+        chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+        signal: new AbortController().signal,
+        provisioning: 'deterministic-fixture',
+        claimsOutcome: 'completed',
+      })
+
+      expect(result.status, result.reason).toBe('completed')
+      expect(result.outputToken).toBe(NATIVE)
+      expect(result.forwardReceived).toBeGreaterThan(0n)
+      expect(result.reverseFunding).toBe('native-value')
+      expect(result.reverseApproved).toBe(0n)
+      expect(result.reverse?.nativeValue).toBe(result.forwardReceived)
+      expect(result.reverseReceived).toBeGreaterThan(0n)
+      expect(result.forward?.proof?.proof.calls.map((call) => call.target.toLowerCase()))
+        .toContain(HACKEN_FIXTURE_CONTEXT.hook.toLowerCase())
+      expect(result.reverse?.proof?.proof.calls.map((call) => call.target.toLowerCase()))
+        .toContain(HACKEN_FIXTURE_CONTEXT.hook.toLowerCase())
+    } finally {
+      session.close()
+    }
+  })
+
+  it('buys with bounded native value then approves and sells the exact token output', async () => {
+    ready()
+    const { snapshot } = snapshotWithErc20Harness(ACTOR)
+    const session = directForkSession('erc20-native-first-round-trip', snapshot)
+    const token = HACKEN_FIXTURE_CONTEXT.nativeCurrency1
+    const nativeInput = 1_000_000_000_000_000n
+
+    const readBalance = async (currency: Address, owner: Address) => {
+      expect(currency).toBe(token)
+      const result = await session.execute({
+        transaction: {
+          executionMode: 'simulation',
+          caller: owner,
+          to: currency,
+          calldata: encodeFunctionData({ abi: BALANCE_ABI, functionName: 'balanceOf', args: [owner] }),
+          value: 0n,
+          gasLimit: 200_000n,
+          gasPrice: 0n,
+          nonce: 0,
+          chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+          traceLimit: 64,
+        },
+        block: FIXTURE_BLOCK,
+      })
+      expect(result.proof.success).toBe(true)
+      return BigInt(result.proof.output.slice(0, 66))
+    }
+
+    try {
+      const result = await runErc20RoundTrip({
+        session,
+        readBalance,
+        poolKey: {
+          currency0: HACKEN_FIXTURE_CONTEXT.nativeCurrency0,
+          currency1: token,
+          fee: HACKEN_FIXTURE_CONTEXT.fee,
+          tickSpacing: HACKEN_FIXTURE_CONTEXT.tickSpacing,
+          hooks: HACKEN_FIXTURE_CONTEXT.hook,
+        },
+        poolId: HACKEN_FIXTURE_CONTEXT.nativePoolId,
+        hook: HACKEN_FIXTURE_CONTEXT.hook,
+        poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
+        harness: HACKEN_FIXTURE_CONTEXT.swapRouter,
+        payer: ACTOR,
+        inputToken: NATIVE,
+        nativeInputAmount: nativeInput,
+        block: FIXTURE_BLOCK,
+        chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+        signal: new AbortController().signal,
+        provisioning: 'verified-storage-overlay',
+        claimsOutcome: 'completed',
+      })
+
+      expect(result.status, result.reason).toBe('completed')
+      expect(result.forward?.nativeValue).toBe(nativeInput)
+      expect(result.forward?.tokenRole).toBe('output')
+      expect(result.outputToken).toBe(token)
+      expect(result.forwardReceived).toBeGreaterThan(0n)
+      expect(result.reverseFunding).toBe('erc20-approval')
+      expect(result.reverseApproved).toBe(result.forwardReceived)
+      expect(result.reverseReceived).toBeGreaterThan(0n)
+    } finally {
+      session.close()
+    }
   })
 })

@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url'
 const methodologyPath = fileURLToPath(new URL('./docs/V4_HOOK_ANALYZER_ARCHITECTURE.md', import.meta.url))
 const methodologyUrl = '/docs/V4_HOOK_ANALYZER_ARCHITECTURE.md'
 
-function methodologyAsset(): Plugin {
+function methodologyAsset(emitBuildAsset: boolean): Plugin {
   const serveMethodology = (request: { url?: string }, response: { setHeader(name: string, value: string): void; end(body: Buffer): void }, next: () => void) => {
     if (request.url?.split('?', 1)[0] !== methodologyUrl) return next()
     response.setHeader('Content-Type', 'text/markdown; charset=utf-8')
     response.end(readFileSync(methodologyPath))
   }
-  return {
+  const plugin: Plugin = {
     name: 'hookscope-methodology-asset',
     configureServer(server: { middlewares: { use(handler: typeof serveMethodology): void } }) {
       server.middlewares.use(serveMethodology)
@@ -21,10 +21,13 @@ function methodologyAsset(): Plugin {
     configurePreviewServer(server: { middlewares: { use(handler: typeof serveMethodology): void } }) {
       server.middlewares.use(serveMethodology)
     },
-    buildStart() {
-      this.emitFile({ type: 'asset', fileName: methodologyUrl.slice(1), source: readFileSync(methodologyPath) })
-    },
   }
+  if (emitBuildAsset) {
+    plugin.buildStart = function buildMethodologyAsset() {
+      this.emitFile({ type: 'asset', fileName: methodologyUrl.slice(1), source: readFileSync(methodologyPath) })
+    }
+  }
+  return plugin
 }
 
 /**
@@ -69,7 +72,7 @@ function subgraphProxy(apiKey: string | undefined): Plugin {
   }
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   // Vite exposes prefixed values through import.meta.env, but it deliberately
   // does not merge server-only values from .env into process.env. Load the
   // complete environment here so the local proxy sees the same server-side key
@@ -77,7 +80,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
-    plugins: [methodologyAsset(), subgraphProxy(env.SUBGRAPH_API_KEY), react()],
+    plugins: [methodologyAsset(command === 'build'), subgraphProxy(env.SUBGRAPH_API_KEY), react()],
     // EVMole's wasm-bindgen entrypoint resolves its binary relative to
     // import.meta.url. Prebundling relocates that module without its .wasm file.
     optimizeDeps: { exclude: ['evmole'] },

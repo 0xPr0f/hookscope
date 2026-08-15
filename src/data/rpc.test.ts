@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isEndpointCapabilityError } from './rpc'
+import { isEndpointCapabilityError, toViemChain } from './rpc'
 import { CHAINS, getChainConfig } from '../config/chains'
 
 describe('RPC endpoint failover', () => {
@@ -31,10 +31,12 @@ describe('RPC endpoint failover', () => {
     expect(isEndpointCapabilityError(new Error("Can't route your request to suitable provider"))).toBe(true)
   })
 
-  it('treats any HTTP-level refusal as an endpoint problem', () => {
-    for (const status of [400, 403, 429, 502, 503]) {
+  it('rotates on transient HTTP failures without multiplying generic bad requests', () => {
+    for (const status of [408, 425, 429, 502, 503]) {
       expect(isEndpointCapabilityError(Object.assign(new Error('HTTP request failed.'), { status })), String(status)).toBe(true)
     }
+    expect(isEndpointCapabilityError(Object.assign(new Error('HTTP request failed.'), { status: 400 }))).toBe(false)
+    expect(isEndpointCapabilityError(Object.assign(new Error('HTTP request failed.'), { status: 403 }))).toBe(false)
   })
 
   it('reads a capability complaint nested in the error cause chain', () => {
@@ -68,5 +70,13 @@ describe('RPC endpoint failover', () => {
     expect(getChainConfig(10).rpcUrls[0]).toBe('https://optimism.drpc.org')
     expect(getChainConfig(130).rpcUrls[0]).toBe('https://unichain.drpc.org')
     expect(getChainConfig(196).rpcUrls[0]).toBe('https://xlayerrpc.okx.com')
+  })
+
+  it('exposes the configured explorer through viem chain metadata', () => {
+    const ethereum = toViemChain(getChainConfig(1))
+    const base = toViemChain(getChainConfig(8453))
+
+    expect(ethereum.blockExplorers?.default.url).toBe('https://etherscan.io')
+    expect(base.blockExplorers?.default.url).toBe('https://basescan.org')
   })
 })

@@ -3,6 +3,7 @@ import type { ChainConfig } from '../config/chains'
 import { subgraphInitialCursor, subgraphQuery } from '../config/subgraphs'
 import type { PoolDescriptor, PoolReplayKind, PoolReplayReference } from '../domain/report'
 import { computePoolId } from '../adapters/uniswapV4Pool'
+import { runtimeSubgraphRequest } from './graphPreferences'
 
 const POOL_ID = /^0x[0-9a-fA-F]{64}$/
 const TRANSACTION_HASH = /^0x[0-9a-fA-F]{64}$/
@@ -243,7 +244,8 @@ async function fetchSubgraphIndex(input: {
   fetcher: PoolIndexFetch
 }): Promise<PoolIndexResult | undefined> {
   const { chain, token, signal, fetcher } = input
-  if (!chain.subgraphUrl) return
+  const request = runtimeSubgraphRequest(chain)
+  if (!request) return
   const unique = new Map<string, PoolDescriptor>()
   const pageSize = 1_000
   const pageCeiling = 50
@@ -257,10 +259,10 @@ async function fetchSubgraphIndex(input: {
 
   for (let page = 0; page < pageCeiling; page += 1) {
     if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
-    const response = await fetcher(chain.subgraphUrl, {
+    const response = await fetcher(request.url, {
       method: 'POST',
       signal,
-      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      headers: { accept: 'application/json', 'content-type': 'application/json', ...request.headers },
       body: JSON.stringify({
         query: subgraphQuery(schema),
         variables: { token: token.toLowerCase(), first: pageSize, cursor0, cursor1 },

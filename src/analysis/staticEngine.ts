@@ -3,8 +3,9 @@ import type { EvmoleContractInfo } from 'evmole'
 import { toFunctionSelector, type Hex } from 'viem'
 import { decodeHookPermissions, HOOK_FLAGS } from '../domain/hooks'
 import type { ContractNode, Evidence, StaticAnalysisResult, StaticSubject } from '../domain/report'
+import { buildCfgReachability, classifyOffset, type CfgReachability } from './cfgReachability'
 
-const DETECTOR_VERSION = '0.2.0'
+const DETECTOR_VERSION = '0.3.0'
 
 type EvmoleContractInfoFn = (
   code: string,
@@ -45,6 +46,10 @@ function firstPc(opcodes: OpcodeRecord[], mnemonic: string): number | undefined 
   return opcodes.find((opcode) => opcode.mnemonic === mnemonic)?.pc
 }
 
+function allPcs(opcodes: OpcodeRecord[], mnemonic: string): number[] {
+  return opcodes.filter((opcode) => opcode.mnemonic === mnemonic).map((opcode) => opcode.pc)
+}
+
 function has(opcodes: OpcodeRecord[], mnemonic: string): boolean {
   return opcodes.some((opcode) => opcode.mnemonic === mnemonic)
 }
@@ -53,57 +58,92 @@ function normalizeSelector(value: string): Hex {
   return (value.startsWith('0x') ? value : `0x${value}`) as Hex
 }
 
-function analyzeRules(subject: StaticSubject, opcodes: OpcodeRecord[]): Evidence[] {
+/**
+ * Graded evidence for one opcode.
+ *
+ * Presence in the disassembly is the weakest claim there is, and until this
+ * point it was being reported as a reachable high-severity finding. The levels
+ * separate what is known: the bytes exist, a control-flow path admits them, and
+ * — established elsewhere, by execution — something actually happened.
+ */
+function opcodeReachabilityFinding(input: {
+  subject: StaticSubject
+  graph?: CfgReachability
+  pc: number
+  opcode: 'DELEGATECALL' | 'SELFDESTRUCT'
+  presentClaim: string
+  reachableClaim: string
+}): Evidence {
+  const verdict = input.graph ? classifyOffset(input.graph, input.pc) : undefined
+  const reachable = verdict?.status === 'reachable'
+  const slug = input.opcode.toLowerCase()
+
+  return evidence(input.subject, {
+    detectorId: reachable ? `cfg-reachable-${slug}` : `${slug}-opcode-present`,
+    // Structural reachability is worth more than presence and less than an
+    // observed execution, so it sits between them rather than at the top.
+    severity: reachable ? 'medium' : 'info',
+    evidenceClass: 'static-reachability',
+    title: reachable
+      ? `${input.opcode} is reachable in the control-flow graph`
+      : `${input.opcode} is present in the bytecode`,
+    claim: reachable ? input.reachableClaim : input.presentClaim,
+    confidence: reachable ? 'supported' : 'heuristic',
+    programCounter: input.pc,
+    reproducibility: 'not-applicable',
+    technical: {
+      opcode: input.opcode,
+      reachability: verdict?.status ?? 'not-analyzed',
+      reachabilityReason: verdict && verdict.status === 'unknown' ? verdict.reason : undefined,
+      blockId: verdict && verdict.status !== 'unknown' ? verdict.blockId : undefined,
+      cfgEntryPoints: input.graph?.entryPoints.length,
+    },
+  })
+}
+
+function analyzeRules(subject: StaticSubject, opcodes: OpcodeRecord[], graph?: CfgReachability): Evidence[] {
   const findings: Evidence[] = []
-  const delegatePc = firstPc(opcodes, 'DELEGATECALL')
-  const selfdestructPc = firstPc(opcodes, 'SELFDESTRUCT')
-  const callPc = firstPc(opcodes, 'CALL')
+  const delegatePcs = allPcs(opcodes, 'DELEGATECALL')
+  const selfdestructPcs = allPcs(opcodes, 'SELFDESTRUCT')
+  const callPcs = allPcs(opcodes, 'CALL')
   const originPc = firstPc(opcodes, 'ORIGIN')
   const transientPc = firstPc(opcodes, 'TSTORE') ?? firstPc(opcodes, 'TLOAD')
   const callerPc = firstPc(opcodes, 'CALLER')
   const sstorePc = firstPc(opcodes, 'SSTORE')
 
-  if (delegatePc !== undefined) {
-    findings.push(
-      evidence(subject, {
-        detectorId: 'reachable-delegatecall',
-        severity: 'high',
-        evidenceClass: 'static-reachability',
-        title: 'Delegated code path is reachable',
-        claim: 'A reachable path executes another contract’s code in this contract’s storage context. The target and resulting state changes need pool-specific execution.',
-        confidence: 'supported',
-        programCounter: delegatePc,
-        reproducibility: 'not-applicable',
-        technical: { opcode: 'DELEGATECALL' },
-      }),
-    )
+  for (const delegatePc of delegatePcs) {
+    findings.push(opcodeReachabilityFinding({
+      subject,
+      graph,
+      pc: delegatePc,
+      opcode: 'DELEGATECALL',
+      presentClaim: 'The bytecode contains DELEGATECALL, but no resolved control-flow path from an entry point reaches it. Presence alone says nothing about whether it can execute.',
+      reachableClaim: 'A resolved control-flow path from an entry point reaches DELEGATECALL, which would execute another contract’s code in this contract’s storage context. Whether it executes, and against which target, requires concrete execution.',
+    }))
   }
 
-  if (selfdestructPc !== undefined) {
-    findings.push(
-      evidence(subject, {
-        detectorId: 'reachable-selfdestruct',
-        severity: 'high',
-        evidenceClass: 'static-reachability',
-        title: 'SELFDESTRUCT value-transfer path is reachable',
-        claim: 'A reachable path executes SELFDESTRUCT. On current Ethereum rules this can still transfer the contract balance; legacy and chain-specific code-removal semantics are recorded separately.',
-        confidence: 'supported',
-        programCounter: selfdestructPc,
-        reproducibility: 'not-applicable',
-        technical: { opcode: 'SELFDESTRUCT' },
-      }),
-    )
+  for (const selfdestructPc of selfdestructPcs) {
+    findings.push(opcodeReachabilityFinding({
+      subject,
+      graph,
+      pc: selfdestructPc,
+      opcode: 'SELFDESTRUCT',
+      presentClaim: 'The bytecode contains SELFDESTRUCT, but no resolved control-flow path from an entry point reaches it. Presence alone says nothing about whether it can execute.',
+      reachableClaim: 'A resolved control-flow path from an entry point reaches SELFDESTRUCT. On current Ethereum rules this can still transfer the contract balance; whether it executes requires concrete execution.',
+    }))
   }
 
   if (originPc !== undefined) {
     findings.push(
       evidence(subject, {
-        detectorId: 'origin-authorization',
-        severity: 'high',
+        detectorId: 'origin-opcode-present',
+        // A raw ORIGIN read is informational. It becomes meaningful only once
+        // something is shown to depend on it — a branch, a call target, a write.
+        severity: 'info',
         evidenceClass: 'static-reachability',
-        title: 'Transaction origin affects execution',
-        claim: 'Reachable code reads ORIGIN, so the hook can behave differently when a swap is routed through another contract. Scenarios should compare direct and routed calls.',
-        confidence: 'supported',
+        title: 'Transaction origin is read',
+        claim: 'The bytecode reads ORIGIN. Whether that read affects a branch, a call target, or a storage write is not established by its presence; controlled execution comparing direct and routed callers is what would show it.',
+        confidence: 'heuristic',
         programCounter: originPc,
         reproducibility: 'not-applicable',
         technical: { opcode: 'ORIGIN' },
@@ -114,11 +154,11 @@ function analyzeRules(subject: StaticSubject, opcodes: OpcodeRecord[]): Evidence
   if (callerPc !== undefined && sstorePc !== undefined) {
     findings.push(
       evidence(subject, {
-        detectorId: 'caller-dependent-storage',
-        severity: 'medium',
+        detectorId: 'caller-and-storage-present',
+        severity: 'info',
         evidenceClass: 'static-reachability',
-        title: 'Caller-dependent state update',
-        claim: 'The reachable graph reads CALLER and writes persistent storage. Concrete scenarios must compare privileged, router, and ordinary callers.',
+        title: 'Caller is read and persistent storage is written',
+        claim: 'The bytecode both reads CALLER and writes persistent storage. These are two separate facts: no data-flow between them is established here, and a controlled comparison that changes only the caller is what would establish one.',
         confidence: 'heuristic',
         programCounter: callerPc,
         reproducibility: 'not-applicable',
@@ -143,18 +183,29 @@ function analyzeRules(subject: StaticSubject, opcodes: OpcodeRecord[]): Evidence
     )
   }
 
-  if (callPc !== undefined) {
+  for (const callPc of callPcs) {
+    const verdict = graph ? classifyOffset(graph, callPc) : undefined
+    const reachable = verdict?.status === 'reachable'
     findings.push(
       evidence(subject, {
-        detectorId: 'external-call-surface',
-        severity: 'medium',
+        detectorId: reachable ? 'external-call-surface' : 'call-opcode-present',
+        severity: reachable ? 'medium' : 'info',
         evidenceClass: 'static-reachability',
-        title: 'External call during hook execution',
-        claim: 'A reachable path calls an external contract. Pool-specific execution should record the target, returned data, any nested callback, and resulting balance or delta changes.',
-        confidence: 'supported',
+        title: reachable ? 'External call is reachable in the control-flow graph' : 'External call opcode is present in bytecode',
+        claim: reachable
+          ? 'A resolved control-flow path reaches CALL. Pool-specific execution should record the target, returned data, nested callbacks, and resulting balance or delta changes.'
+          : verdict?.status === 'unknown'
+            ? 'The bytecode contains CALL, but unresolved computed control flow means its reachability is unknown. Presence is not presented as an executed external call.'
+            : 'The bytecode contains CALL, but no resolved path from an entry point reaches it. Presence is not presented as an executed external call.',
+        confidence: reachable ? 'supported' : 'heuristic',
         programCounter: callPc,
         reproducibility: 'not-applicable',
-        technical: { opcode: 'CALL' },
+        technical: {
+          opcode: 'CALL',
+          reachability: verdict?.status ?? 'not-analyzed',
+          reachabilityReason: verdict?.status === 'unknown' ? verdict.reason : undefined,
+          blockId: verdict && verdict.status !== 'unknown' ? verdict.blockId : undefined,
+        },
       }),
     )
   }
@@ -264,7 +315,7 @@ function analyzeHookSurface(subject: StaticSubject, selectors: Hex[], bytecodeSi
  * statically resolvable. Reporting those separately keeps a decoded fact from
  * being presented as a reachability inference.
  */
-function analyzeContractSurface(subject: StaticSubject, info: EvmoleContractInfo): Evidence[] {
+function analyzeContractSurface(subject: StaticSubject, info: EvmoleContractInfo, graph?: CfgReachability): Evidence[] {
   const findings: Evidence[] = []
   const functions = info.functions ?? []
 
@@ -348,21 +399,17 @@ function analyzeContractSurface(subject: StaticSubject, info: EvmoleContractInfo
     }))
   }
 
-  const dynamicJumps = (info.controlFlowGraph?.blocks ?? []).filter((block) => {
-    const value: unknown = block
-    const type = value instanceof Map ? value.get('type') : (value as { type?: unknown }).type
-    return typeof type === 'string' && type.startsWith('DynamicJump')
-  })
-  if (dynamicJumps.length) {
+  const unresolvedDynamicJumps = graph?.unresolvedBlocks ?? []
+  if (unresolvedDynamicJumps.length) {
     findings.push(evidence(subject, {
       detectorId: 'evmole-unresolved-control-flow',
       severity: 'low',
       evidenceClass: 'static-reachability',
       title: 'Control flow contains computed jumps',
-      claim: `${dynamicJumps.length} block(s) end in a computed jump whose destination is not statically fixed, so static reachability under-approximates this contract. Concrete execution remains authoritative.`,
+      claim: `${unresolvedDynamicJumps.length} reachable block(s) end in a computed jump whose destination is not statically fixed, so static reachability under-approximates this contract. Resolved computed jumps are included in traversal and are not counted here. Concrete execution remains authoritative.`,
       confidence: 'supported',
       reproducibility: 'not-applicable',
-      technical: { dynamicJumpBlocks: dynamicJumps.length, totalBlocks: info.controlFlowGraph?.blocks.length ?? 0 },
+      technical: { unresolvedBlockIds: unresolvedDynamicJumps, dynamicJumpBlocks: unresolvedDynamicJumps.length, totalBlocks: info.controlFlowGraph?.blocks.length ?? 0 },
     }))
   }
 
@@ -380,6 +427,9 @@ function normalizeOpcodes(disassembled: [number, string][] | undefined): OpcodeR
 export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysisResult {
   const findings: Evidence[] = []
   const nodes: ContractNode[] = []
+  // Reachability caveats, surfaced so a report never presents an unresolved
+  // computed jump as proof that code is dead.
+  const cfgLimitations: string[] = []
   let paths = 0
   let branches = 0
   const availability: StaticAnalysisResult['engineAvailability'] = {
@@ -436,10 +486,14 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
     }
 
     const opcodes = normalizeOpcodes(disassembled)
-    findings.push(...analyzeRules(subject, opcodes))
+    // Structural reachability, so an opcode is never reported as reachable
+    // merely because it appears in the flat disassembly.
+    const cfg = contractInfo ? buildCfgReachability(contractInfo) : undefined
+    if (cfg?.limitations.length) cfgLimitations.push(...cfg.limitations)
+    findings.push(...analyzeRules(subject, opcodes, cfg))
     const bytecodeSize = Math.max(0, (subject.bytecode.length - 2) / 2)
     findings.push(...analyzeHookSurface(subject, selectors, bytecodeSize))
-    if (contractInfo) findings.push(...analyzeContractSurface(subject, contractInfo))
+    if (contractInfo) findings.push(...analyzeContractSurface(subject, contractInfo, cfg))
     nodes.push({
       address: subject.address,
       role: subject.role,
@@ -465,5 +519,12 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
     }
   }
 
-  return { findings, nodes, paths, branches, engineAvailability: availability }
+  return {
+    findings,
+    nodes,
+    paths,
+    branches,
+    engineAvailability: availability,
+    limitations: [...new Set(cfgLimitations)],
+  }
 }

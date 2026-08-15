@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Address, Hex, PublicClient } from 'viem'
 import type { ChainConfig } from '../config/chains'
 import type { PoolDescriptor } from '../domain/report'
-import { computePoolId, computePoolStateSlot, discoverPools } from './uniswapV4'
+import { attachInitializationTransactions, computePoolId, computePoolStateSlot, discoverPools } from './uniswapV4'
 
 const TOKEN = '0x1111111111111111111111111111111111111111' as Address
 const POOL_MANAGER = '0x2222222222222222222222222222222222222222' as Address
@@ -161,5 +161,22 @@ describe('Uniswap v4 index-first discovery', () => {
     expect(result.completeHistory).toBe(true)
     expect(result.pools).toHaveLength(1)
     expect(result.pools[0]?.poolId).toBe(fallbackPool.poolId)
+  })
+})
+
+describe('initialization transaction attachment', () => {
+  it('groups pools initialized in one block into one log read', async () => {
+    const first = pool(95n, 3_000)
+    const second = pool(95n, 500)
+    const getLogs = async () => [initializeLog(first), initializeLog(second)]
+    const result = await attachInitializationTransactions(
+      { getLogs } as unknown as PublicClient,
+      POOL_MANAGER,
+      [first, second],
+    )
+
+    expect(result.requests).toBe(1)
+    expect(result.unresolved).toBe(0)
+    expect(result.pools.every((item) => item.transactionHash)).toBe(true)
   })
 })

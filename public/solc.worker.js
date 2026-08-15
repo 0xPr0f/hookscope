@@ -3,11 +3,32 @@
 // This worker deliberately contains only the small loading surface needed for
 // an official soljson build. It is not Remix code and does not bundle Remix.
 const SOLC_ORIGIN = 'https://binaries.soliditylang.org/bin/'
+// Loaded from this worker's own origin, beside it in the published bundle.
+importScripts(new URL('astDependencies.js', self.location.href).href)
 const VERSION_PATTERN = /^0\.\d+\.\d+\+commit\.[0-9a-f]{8}$/i
 const MAX_AST_NODES = 500_000
 let loadedVersion
 let compileStandard
 let compilerVersion
+
+const MAX_DEPENDENCY_FACTS = 2_000
+
+/**
+ * Runs the dependency analysis, bounded and non-fatal.
+ *
+ * A compile that produced a usable AST must still return its other facts if
+ * this pass fails, so a dependency bug can never cost the caller its source
+ * analysis entirely.
+ */
+function dependencyFacts(roots) {
+  const analyzer = self.HookscopeAstDependencies
+  if (!analyzer || typeof analyzer.analyzeAstDependencies !== 'function') return []
+  try {
+    return analyzer.analyzeAstDependencies(roots).slice(0, MAX_DEPENDENCY_FACTS)
+  } catch (error) {
+    return [{ sink: 'analysis-failed', sources: [], function: '', detail: String(error && error.message ? error.message : error) }]
+  }
+}
 
 function compilerUrl(version) {
   if (!VERSION_PATTERN.test(version)) throw new Error(`Unsupported Solidity compiler version: ${version}`)
@@ -178,6 +199,9 @@ function summarizeAst(output, fullyQualifiedName) {
     externalCalls: unique(externalCalls, (item) => `${item.operation}:${item.sourcePath}:${item.src}`),
     stateWrites: unique(stateWrites, (item) => `${item.variable}:${item.sourcePath}:${item.src}`),
     senderGates: unique(senderGates, (item) => `${item.kind}:${item.sourcePath}:${item.src}`),
+    // Intraprocedural source-to-sink dependencies. Unlike the pattern matches
+    // above, these state that a value actually reaches somewhere consequential.
+    dependencies: dependencyFacts(roots),
     abi: artifact.abi || [],
     storageLayout: artifact.storageLayout || { storage: [], types: {} },
     methodIdentifiers: artifact.evm?.methodIdentifiers || {},

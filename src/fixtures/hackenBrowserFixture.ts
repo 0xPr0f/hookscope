@@ -27,6 +27,9 @@ export type HackenFixtureContext = {
   poolId: Hex
   secondaryPoolId: Hex
   secondaryTickSpacing: number
+  nativeCurrency0: Address
+  nativeCurrency1: Address
+  nativePoolId: Hex
   sqrtPriceX96: bigint
 }
 
@@ -47,6 +50,9 @@ export const HACKEN_FIXTURE_CONTEXT: HackenFixtureContext = {
   poolId: contextJson.poolId as Hex,
   secondaryPoolId: contextJson.secondaryPoolId as Hex,
   secondaryTickSpacing: Number(contextJson.secondaryTickSpacing),
+  nativeCurrency0: getAddress(contextJson.nativeCurrency0),
+  nativeCurrency1: getAddress(contextJson.nativeCurrency1),
+  nativePoolId: contextJson.nativePoolId as Hex,
   sqrtPriceX96: BigInt(contextJson.sqrtPriceX96),
 }
 

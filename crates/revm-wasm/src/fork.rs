@@ -90,6 +90,18 @@ struct ForkSnapshot {
     block_hashes: Vec<SnapshotBlockHash>,
 }
 
+/// Validation rules applied to one execution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ExecutionMode {
+    /// Real transaction rules. The default, so an unmarked call is never
+    /// silently granted relaxed validation.
+    #[default]
+    Transaction,
+    /// `eth_call` semantics for generated and read-only executions.
+    Simulation,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ForkTransaction {
@@ -102,6 +114,20 @@ struct ForkTransaction {
     nonce: u64,
     chain_id: u64,
     max_priority_fee_per_gas: Option<String>,
+    /// How this execution is validated.
+    ///
+    /// `Transaction` keeps the real rules: nonce, base fee and balance are all
+    /// enforced, which is what makes a historical replay a reproduction rather
+    /// than an approximation.
+    ///
+    /// `Simulation` is `eth_call` semantics, for calls nobody signed. A
+    /// generated scenario's caller has a real onchain nonce the analyzer has no
+    /// reason to track, and charging it the pinned block's base fee would
+    /// consume the very native balance an observation may be about. The block
+    /// still reports its real base fee, so `BASEFEE` stays accurate inside the
+    /// call; only the validity check is relaxed.
+    #[serde(default)]
+    execution_mode: ExecutionMode,
     #[serde(default = "default_trace_limit")]
     trace_limit: usize,
 }
@@ -406,6 +432,7 @@ fn run_database(
 ) -> ForkStep {
     let trace_limit = transaction.trace_limit;
     let chain_id = transaction.chain_id;
+    let simulated = transaction.execution_mode == ExecutionMode::Simulation;
     let transaction = match build_transaction(transaction) {
         Ok(transaction) => transaction,
         Err(message) => return ForkStep::Failure { message },
@@ -417,7 +444,14 @@ fn run_database(
     let context = Context::mainnet()
         .with_db(database.clone())
         .with_block(block)
-        .with_cfg(CfgEnv::<SpecId>::default().with_chain_id(chain_id));
+        .with_cfg({
+            let mut cfg = CfgEnv::<SpecId>::default().with_chain_id(chain_id);
+            // The block still reports its real base fee, so `BASEFEE` reads
+            // correctly inside the call; only the validity check is relaxed.
+            cfg.disable_nonce_check = simulated;
+            cfg.disable_base_fee = simulated;
+            cfg
+        });
     let mut inspector = EvidenceInspector::with_step_limit(trace_limit);
     let result_and_state = {
         let mut evm = context.build_mainnet_with_inspector(&mut inspector);
@@ -866,8 +900,53 @@ mod tests {
             nonce: 0,
             chain_id: 1,
             max_priority_fee_per_gas: None,
+            execution_mode: ExecutionMode::Transaction,
             trace_limit: default_trace_limit(),
         }
+    }
+
+    /// A generated scenario's caller has a real onchain nonce the analyzer does
+    /// not track, and the pinned block charges a base fee a zero-priced call
+    /// cannot pay. Both must be rejected as a transaction and accepted as a
+    /// simulated call, or the whole generated path dies before reaching a pool.
+    fn unpayable_transaction(mode: ExecutionMode) -> ForkTransaction {
+        ForkTransaction {
+            nonce: 7,
+            execution_mode: mode,
+            ..transaction()
+        }
+    }
+
+    fn block_charging_base_fee() -> ForkBlock {
+        ForkBlock {
+            base_fee: 1_000_000_000,
+            ..block()
+        }
+    }
+
+    fn funded_pair() -> ForkSnapshot {
+        ForkSnapshot {
+            accounts: vec![
+                account("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "0x"),
+                account("0xffffffffffffffffffffffffffffffffffffffff", "0x00"),
+                // The beneficiary is credited during execution, so it has to be
+                // present for the call to run to completion.
+                account(&Address::ZERO.to_string(), "0x"),
+            ],
+            block_hashes: vec![],
+        }
+    }
+
+    #[test]
+    fn a_real_transaction_still_enforces_nonce_and_base_fee() {
+        let step = run_snapshot(funded_pair(), unpayable_transaction(ExecutionMode::Transaction), block_charging_base_fee());
+        assert!(matches!(step, ForkStep::Failure { .. }), "{step:?}");
+    }
+
+    #[test]
+    fn a_simulated_call_ignores_nonce_and_base_fee() {
+        let step = run_snapshot(funded_pair(), unpayable_transaction(ExecutionMode::Simulation), block_charging_base_fee());
+        assert!(matches!(step, ForkStep::Complete { .. }), "{step:?}");
     }
 
     fn block() -> ForkBlock {
@@ -943,6 +1022,57 @@ mod tests {
             block(),
         );
         assert!(matches!(second, ForkStep::Complete { .. }));
+    }
+
+    #[test]
+    fn delegatecall_frames_separate_sender_storage_and_code_addresses() {
+        const IMPLEMENTATION: &str = "0x1111111111111111111111111111111111111111";
+        const TARGET: &str = "0xffffffffffffffffffffffffffffffffffffffff";
+        const CALLER: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+        // DELEGATECALL IMPLEMENTATION with empty input/output, then STOP.
+        let mut target = account(
+            TARGET,
+            &format!("0x600060006000600073{}5af400", &IMPLEMENTATION[2..]),
+        );
+        target.storage_complete = true;
+        let mut implementation = account(IMPLEMENTATION, "0x600160005500");
+        implementation.storage_complete = true;
+        let mut caller = account(CALLER, "0x");
+        caller.storage_complete = true;
+        let mut beneficiary = account(&Address::ZERO.to_string(), "0x");
+        beneficiary.storage_complete = true;
+
+        let ForkStep::Complete { proof } = run_snapshot(
+            ForkSnapshot {
+                accounts: vec![caller, target, implementation, beneficiary],
+                block_hashes: vec![],
+            },
+            transaction(),
+            block(),
+        ) else {
+            panic!("delegatecall fixture did not complete")
+        };
+
+        let delegated = proof
+            .calls
+            .iter()
+            .find(|call| call.scheme == "DelegateCall")
+            .expect("delegated frame must be recorded");
+        assert_eq!(delegated.caller, CALLER);
+        assert_eq!(delegated.target, TARGET);
+        assert_eq!(delegated.bytecode_address, IMPLEMENTATION);
+        assert!(delegated.parent_frame_id.is_some());
+
+        let write = proof
+            .storage_operations
+            .iter()
+            .find(|operation| operation.opcode == "SSTORE")
+            .expect("delegated SSTORE must be recorded");
+        assert_eq!(write.frame_id, delegated.frame_id);
+        assert_eq!(write.address, IMPLEMENTATION);
+        assert_eq!(write.storage_address, TARGET);
+        assert!(proof.storage_diffs.iter().any(|diff| diff.address == TARGET));
     }
 
     #[cfg(feature = "libafl-fuzz")]

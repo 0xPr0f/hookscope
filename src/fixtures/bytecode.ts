@@ -31,7 +31,7 @@ export const STATIC_FIXTURES: StaticFixture[] = [
       codeHash: codeHash('1040'),
       affectedPools: [],
     },
-    expectedDetectors: ['reachable-delegatecall'],
+    expectedDetectors: ['cfg-reachable-delegatecall'],
   },
   {
     name: 'origin-caller-gate',
@@ -42,7 +42,7 @@ export const STATIC_FIXTURES: StaticFixture[] = [
       codeHash: codeHash('2080'),
       affectedPools: [],
     },
-    expectedDetectors: ['origin-authorization', 'caller-dependent-storage'],
+    expectedDetectors: ['origin-opcode-present', 'caller-and-storage-present'],
   },
   {
     name: 'transient-sequence-gate',
@@ -64,7 +64,31 @@ export const STATIC_FIXTURES: StaticFixture[] = [
       codeHash: codeHash('4080'),
       affectedPools: [],
     },
-    expectedDetectors: ['reachable-selfdestruct'],
+    expectedDetectors: ['cfg-reachable-selfdestruct'],
+  },
+  {
+    name: 'dead-delegatecall-after-stop',
+    subject: {
+      address: address('6010'),
+      role: 'hook',
+      // DELEGATECALL sits after an unconditional STOP with nothing jumping in.
+      bytecode: '0x6000600000600060006000600060006000f400',
+      codeHash: codeHash('6010'),
+      affectedPools: [],
+    },
+    // Present, not reachable: the graded finding, never the reachable one.
+    expectedDetectors: ['delegatecall-opcode-present'],
+  },
+  {
+    name: 'dead-selfdestruct-behind-invalid-jump',
+    subject: {
+      address: address('6020'),
+      role: 'hook',
+      bytecode: '0x3660085760016000fd5bff',
+      codeHash: codeHash('6020'),
+      affectedPools: [],
+    },
+    expectedDetectors: ['selfdestruct-opcode-present'],
   },
   {
     name: 'revm-storage-diff',

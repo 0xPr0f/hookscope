@@ -1,61 +1,85 @@
 # Hookscope
 
-Browser-native Uniswap v4 hook behavior and DeFi execution transparency. Hookscope explains pool callbacks, control mechanics, value movement, and tested execution outcomes with explicit evidence and coverage. See [the living architecture and implementation ledger](./docs/V4_HOOK_ANALYZER_ARCHITECTURE.md).
+<img src="./public/brand/hookscope-transparent-v2-192.png" alt="Hookscope logo" width="128" height="128" />
 
-## Local development
+Browser-native Uniswap v4 hook behavior analysis and execution transparency.
+
+Hookscope provides DeFi execution transparency by tracing pool callbacks and recording tested execution outcomes.
+
+Hookscope discovers pools for a token, resolves their hooks and implementations, maps reachable behavior, and records what happened during bounded execution. Reports keep deterministic facts, static reachability, concrete observations, and generated-input outcomes separate. They describe what was tested and found; they do not claim that a contract is safe.
+
+## What it does
+
+- Discovers and verifies Uniswap v4 pools at a pinned block.
+- Resolves hook bytecode, proxies, verified source, ABIs, selectors, and permissions.
+- Runs static analysis in browser workers with WhatsABI, sevm, and EVMole.
+- Executes generated PoolManager scenarios and historical replays through browser-compiled revm.
+- Exercises bounded router-aware inputs while preserving unrelated calldata fields.
+- Presents findings with severity, evidence class, technical traces, coverage, and limitations.
+- Saves only completed reports; cancelled, failed, and partial runs remain local.
+
+## Architecture
+
+The application is built with Vite, React, TypeScript, viem, Web Workers, and WebAssembly. Pool discovery, contract resolution, static analysis, replay, generated scenarios, and bounded exploration run in the browser.
+
+The optional Vercel API surface only proxies subgraph discovery and stores completed reports. It performs no blockchain analysis. PostgreSQL is optional and is never exposed to the browser.
+
+No wallet connection is required. A scan needs only a chain and token address.
+
+## Quick start
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Use **Load deterministic example** to exercise the real WhatsABI/sevm/EVMole static worker, the 40-scenario/80-transaction Hacken browser port through an official PoolManager fixture, revm Wasm execution, and a bounded 30,000-input state-outcome fixture without making an RPC request. The added paired fixtures cover alternate hookData, non-zero return-delta settlement, primary/secondary PoolIds, and open/restricted caller and router policies.
+Open `http://localhost:5173` and select **Load deterministic example** to exercise the browser engines without RPC access.
 
-The analyzer works without a database. `DATABASE_URL` belongs only to the optional Vercel report-storage functions; it must never use a `VITE_` prefix or appear in the browser bundle. Railway runs PostgreSQL only—there is no analysis server.
-
-Public pool discovery is index-first. Published Uniswap v4 subgraph IDs are not
-secrets, so they live in [`src/config/chains.ts`](./src/config/chains.ts); one
-server-side Graph Network key serves every chain through the same-origin proxy:
+The compiled Wasm packages under `src/wasm/` are generated and untracked. A fresh checkout that does not already have them needs a Rust toolchain and `wasm-pack`:
 
 ```bash
-SUBGRAPH_API_KEY='your-graph-key'
+pnpm wasm:build
 ```
 
-The key is read only by `/api/subgraph/<chainId>` and is never compiled into the
-browser bundle. Set `VITE_V4_SUBGRAPH_<chainId>` only to point a chain at a
-credential-free private or self-hosted indexer.
+## Configuration
 
-Discovery treats index results as candidates only: Hookscope recomputes every
-PoolId, validates initialized PoolManager state at the pinned block, and scans
-only the recent log tail. A stale index can therefore withhold pools, but cannot
-introduce one. Without a configured index, discovery falls back to bounded log
-scanning — public endpoints cap `eth_getLogs` at 10,000 blocks, so covering v4
-history from its deployment block needs roughly 400 sequential requests, which
-is why the index path exists.
+Copy `.env.example` to `.env` and add only the values needed for the environment.
 
-See [`.env.example`](./.env.example) for the environment boundary and [the Vercel/Railway deployment runbook](./docs/DEPLOYMENT.md) for migrations, least-privilege roles, preview/production releases, health checks, limits, and rollback. Unrestricted API credentials must not be placed in `VITE_` variables.
+| Variable | Purpose | Exposure |
+| --- | --- | --- |
+| `SUBGRAPH_API_KEY` | The Graph gateway access through the same-origin proxy | Server only |
+| `VITE_RPC_<chainId>` | Optional per-chain browser RPC override | Public/browser |
+| `VITE_V4_SUBGRAPH_<chainId>` | Credential-free private or self-hosted indexer override | Public/browser |
+| `DATABASE_URL` | Optional completed-report persistence | Server only |
+
+Every `VITE_` value is compiled into the browser bundle. Never place credentials in a `VITE_` variable.
+
+## Pool discovery
+
+Discovery is index-first. Subgraph and published-index records are treated as candidates: Hookscope recomputes PoolIds, verifies initialized PoolManager state at the pinned block, and checks the recent log tail.
+
+Without an index, the adapter can use bounded `PoolManager.Initialize` log scanning. Public RPC providers commonly restrict historical log ranges and archive state, so production deployments should configure the subgraph proxy or publish token-sharded indexes.
 
 ## Verification
 
+Run the complete local verification gate:
+
 ```bash
-pnpm test
-pnpm test:rust
-pnpm wasm:build
-pnpm build
+pnpm verify
+```
+
+It runs lint, browser and tooling tests, both Rust/revm configurations, Foundry differential tests, TypeScript, and the production build.
+
+Additional checks:
+
+```bash
 pnpm test:e2e
+pnpm wasm:build
 node scripts/validate-deployment.mjs
 ```
 
-`pnpm verify` runs lint, the browser and tooling suites, both Rust feature configurations, the Foundry oracle, and the production build. The Wasm artifacts under `src/wasm/` are generated and untracked, so a fresh clone needs Rust 1.88 and `wasm-pack` before `pnpm build`.
-
-The Playwright suite is configured for Chromium, Firefox, and WebKit in CI. Local interactive acceptance was also completed through the in-app browser at desktop and 390 px responsive widths.
-
-The optional read-only live canary is explicit because it depends on configured public archive/index availability:
+The Playwright suite targets Chromium, Firefox, and WebKit. The optional live canary requires configured index and archive access:
 
 ```bash
 LIVE_CANARY=1 pnpm exec playwright test tests/e2e/live-canary.spec.ts --project=chromium
 ```
-
-It never persists a failed or timed-out run. Verified index-first discovery is implemented; the Ethereum canary remains gated until `SUBGRAPH_API_KEY` or a credential-free `VITE_V4_SUBGRAPH_1` is configured and canaried in the deployment.
-
-The literal address `0xD0a606aDf58b69a28D479aAA510CE6FE96E0a1eb2` is intentionally covered by validation tests and must fail before RPC access.

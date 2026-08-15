@@ -17,10 +17,12 @@ import { buildScenarioStateOverlay, type ScenarioStateOverlay } from './protocol
  * injected. Each is checked for emptiness at the pinned block before use, and a
  * deterministic alternative is derived when one is already occupied.
  */
-export const SCENARIO_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce4' as Address
-export const SCENARIO_ALTERNATE_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce5' as Address
-export const SCENARIO_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a1' as Address
-export const SCENARIO_ALTERNATE_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a2' as Address
+const SCENARIO_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce4' as Address
+const SCENARIO_ALTERNATE_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce5' as Address
+/** The ERC-20 settlement lane's harness, a separate compiled program. */
+const SCENARIO_ERC20_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce6' as Address
+const SCENARIO_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a1' as Address
+const SCENARIO_ALTERNATE_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a2' as Address
 
 /** How many deterministic alternatives to try before giving up on a slot. */
 const MAX_ADDRESS_PROBES = 64
@@ -31,7 +33,7 @@ const MAX_ADDRESS_PROBES = 64
  * Stepping the low bytes keeps the alternative recognizable in a trace and keeps
  * the choice reproducible: the same chain and block yields the same address.
  */
-export function deriveAlternateAddress(preferred: Address, attempt: number): Address {
+function deriveAlternateAddress(preferred: Address, attempt: number): Address {
   const shifted = (BigInt(preferred) + BigInt(attempt) * 0x1_0000n) & ((1n << 160n) - 1n)
   return getAddress(`0x${shifted.toString(16).padStart(40, '0')}`)
 }
@@ -75,6 +77,8 @@ export type ProtocolScenarioContext = {
   router: Address
   /** A second identical harness instance, so a scenario can vary the `sender` a hook sees. */
   alternateRouter: Address
+  /** The ERC-20 settlement harness, present when that lane could be injected. */
+  erc20Router: Address
   actor: Address
   alternateActor: Address
   /** True when a preferred synthetic address was occupied and an alternative was derived. */
@@ -161,9 +165,10 @@ export async function buildProtocolScenarioContext(input: {
     throw new Error(`No empty address was available for the synthetic account near ${preferred}.`)
   }
 
-  const [router, alternateRouter, actor, alternateActor] = [
+  const [router, alternateRouter, erc20Router, actor, alternateActor] = [
     await claimAddress(SCENARIO_ROUTER_ADDRESS),
     await claimAddress(SCENARIO_ALTERNATE_ROUTER_ADDRESS),
+    await claimAddress(SCENARIO_ERC20_ROUTER_ADDRESS),
     await claimAddress(SCENARIO_ACTOR_ADDRESS),
     await claimAddress(SCENARIO_ALTERNATE_ACTOR_ADDRESS),
   ]
@@ -179,6 +184,7 @@ export async function buildProtocolScenarioContext(input: {
     poolManager,
     poolManagerAccount: { balance: `0x${balance.toString(16)}`, nonce, code },
     routers: [router, alternateRouter],
+    erc20Routers: [erc20Router],
     actors: [actor, alternateActor],
     currencies: [input.pool.currency0, input.pool.currency1],
   })
@@ -201,6 +207,7 @@ export async function buildProtocolScenarioContext(input: {
     pool: input.pool,
     router,
     alternateRouter,
+    erc20Router,
     actor,
     alternateActor,
     relocatedAddresses,

@@ -60,11 +60,12 @@ jobs:
       # inspector tests are not silently gated behind the fuzz feature.
       - run: pnpm test:rust
       - run: pnpm test:foundry
-      # The checked-in harness manifest is exactly what a browser injects into a
-      # user's fork, so a drift between it and the pinned compiler build has to
-      # fail here rather than surface as a wrong claim in a report.
+      # The checked-in harness manifests are exactly what a browser injects into
+      # a user's fork — both settlement lanes — so drift between them and the
+      # pinned compiler build has to fail here rather than surface as a wrong
+      # claim in a report.
       - run: node scripts/generate-protocol-scenario-artifact.mjs
-      - run: git diff --exit-code src/fixtures/generated/protocol-scenario-router.json
+      - run: git diff --exit-code src/fixtures/generated/
 
   e2e:
     name: End-to-end browser matrix

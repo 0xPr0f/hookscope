@@ -94,18 +94,3 @@ export class SolcWorkerSession {
     pending.reject(error)
   }
 }
-
-export async function compileVerifiedSource(input: {
-  bundle: SourcifyCompilationBundle
-  expectedRuntimeCodeHash: string
-  signal: AbortSignal
-  timeoutMs?: number
-  onProgress?: (detail: string) => void
-}): Promise<{ summary: VerifiedSourceSummary; warnings: string[] }> {
-  const session = new SolcWorkerSession(input.bundle.compilerVersion)
-  try {
-    return await session.compile(input)
-  } finally {
-    session.close()
-  }
-}

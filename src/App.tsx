@@ -1,14 +1,20 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { Activity, ArrowRight, Check, ChevronDown, ChevronRight, CircleStop, Download, ExternalLink, Moon, RotateCcw, Sun } from 'lucide-react'
-import { CHAINS } from './config/chains'
+import { Activity, ArrowRight, Check, ChevronRight, CircleStop, Download, ExternalLink, Moon, RotateCcw, Settings, Sun } from 'lucide-react'
+import { CHAINS, getChainConfig } from './config/chains'
+import { toViemChain } from './data/rpc'
 import { shortAddress } from './domain/address'
 import { formatPoolFee } from './domain/poolFee'
-import type { AnalysisReport, Evidence, Severity } from './domain/report'
+import type { AnalysisReport, Severity } from './domain/report'
 import type { CompletedReportCurrentness } from './data/reportCurrentness'
 import { FIXTURE_SCAN_ADDRESS } from './fixtures/bytecode'
 import { useAnalyzer } from './features/analyzer/useAnalyzer'
+import { PoolPicker } from './features/analyzer/PoolPicker'
 import { ScenarioResults } from './features/scenarios/ScenarioResults'
+import { EvidenceLedger } from './features/evidence/EvidenceLedger'
 import { ChainDropdown } from './components/ChainDropdown'
+import { HowItWorksPage, MethodologyPage } from './pages/InformationPages'
+import { informationPageForPath } from './pages/informationRoutes'
+import { RpcSettingsDialog } from './features/settings/RpcSettingsDialog'
 
 const ContractSourceWorkspace = lazy(() => import('./features/source/ContractSourceWorkspace').then((module) => ({ default: module.ContractSourceWorkspace })))
 
@@ -34,36 +40,6 @@ function downloadReport(report: AnalysisReport) {
   link.download = `hookscope-${report.chainId}-${report.token}.json`
   link.click()
   URL.revokeObjectURL(link.href)
-}
-
-function EvidenceRow({ finding }: { finding: Evidence }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className={`evidence-row impact-${finding.severity}`}>
-      <button className="evidence-main" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-        <span className="evidence-marker" aria-hidden="true" />
-        <span className="evidence-impact">{impactLabel(finding.severity)}</span>
-        <span className="evidence-copy">
-          <strong>{finding.title}</strong>
-          <span>{finding.claim}</span>
-        </span>
-        <span className="evidence-class">{finding.evidenceClass.replaceAll('-', ' ')}</span>
-        <ChevronDown size={15} aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="evidence-detail">
-          <dl>
-            <div><dt>Subject</dt><dd>{finding.subject}</dd></div>
-            <div><dt>Rule</dt><dd>{finding.detectorId} · v{finding.detectorVersion}</dd></div>
-            <div><dt>Confidence</dt><dd>{finding.confidence}</dd></div>
-            <div><dt>Program counter</dt><dd>{finding.programCounter ?? 'Contract-level fact'}</dd></div>
-            <div><dt>Reproducibility</dt><dd>{finding.reproducibility}</dd></div>
-          </dl>
-          {finding.technical && <pre>{JSON.stringify(finding.technical, null, 2)}</pre>}
-        </div>
-      )}
-    </div>
-  )
 }
 
 function PhaseRail({ report }: { report: AnalysisReport }) {
@@ -102,6 +78,11 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
   const materialFindings = report.findings.filter((finding) => finding.severity !== 'info')
   const callbackFacts = report.findings.filter((finding) => finding.detectorId === 'hook-permission-bits')
   const scenarioPhase = report.phases.find((phase) => phase.id === 'scenarios')
+  const reportChainConfig = getChainConfig(report.chainId)
+  const reportChain = toViemChain(reportChainConfig)
+  const explorer = reportChain.blockExplorers?.default
+  const explorerBaseUrl = explorer?.url.replace(/\/$/, '')
+  const explorerName = explorer?.name ?? 'chain explorer'
   return (
     <section className="report" aria-live="polite">
       <div className="report-topline">
@@ -164,13 +145,50 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
               <p className="eyebrow">Pool / hook map</p>
               <h3>{report.pools.length} analyzed combinations</h3>
               <div className="pool-list">
-                {report.pools.map((pool) => (
-                  <div className="pool-row" key={pool.poolId}>
-                    <span><b>{formatPoolFee(pool.fee)}</b> fee</span>
-                    <span>Hook {shortAddress(pool.hook)}</span>
-                    <code>{pool.poolId.slice(0, 10)}…</code>
-                  </div>
-                ))}
+                {report.pools.map((pool) => {
+                  const poolTransactionHash = pool.transactionHash ?? pool.replayTransactions?.[0]?.transactionHash
+                  return (
+                    <div className="pool-row" key={pool.poolId}>
+                      <span className="pool-fee"><b>{formatPoolFee(pool.fee)}</b> fee</span>
+                      {explorerBaseUrl
+                        ? (
+                            <a
+                              className="pool-explorer-link pool-hook-link"
+                              href={`${explorerBaseUrl}/address/${pool.hook}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`View hook ${pool.hook} on ${explorerName}`}
+                              title={`View hook on ${explorerName}`}
+                            >
+                              Hook {shortAddress(pool.hook)} <ExternalLink size={11} aria-hidden="true" />
+                            </a>
+                          )
+                        : <span className="pool-hook-link">Hook {shortAddress(pool.hook)}</span>}
+                      {explorerBaseUrl
+                        ? (
+                            <a
+                              className="pool-explorer-link pool-id-link"
+                              href={poolTransactionHash
+                                ? `${explorerBaseUrl}/tx/${poolTransactionHash}`
+                                : reportChainConfig.poolManager
+                                  ? `${explorerBaseUrl}/address/${reportChainConfig.poolManager}`
+                                  : explorerBaseUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={poolTransactionHash
+                                ? `View a recorded transaction for pool ${pool.poolId} on ${explorerName}`
+                                : `View the PoolManager for pool ${pool.poolId} on ${explorerName}`}
+                              title={poolTransactionHash
+                                ? `View pool transaction on ${explorerName}`
+                                : `View PoolManager on ${explorerName}`}
+                            >
+                              <code>{pool.poolId.slice(0, 10)}…</code> <ExternalLink size={11} aria-hidden="true" />
+                            </a>
+                          )
+                        : <code className="pool-id-link">{pool.poolId.slice(0, 10)}…</code>}
+                    </div>
+                  )
+                })}
                 {!report.pools.length && <p>No verified pool initialized with this token at the pinned block.</p>}
               </div>
             </section>
@@ -211,11 +229,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
             <div><p className="eyebrow">Evidence ledger</p><h2>What the deployed mechanism can do</h2></div>
             <button className="text-button" onClick={() => downloadReport(report)}><Download size={14} /> Export JSON</button>
           </div>
-          <div className="evidence-ledger">
-            {report.findings.length ? report.findings.map((finding) => <EvidenceRow finding={finding} key={finding.id} />) : (
-              <p className="empty-ledger">No reportable bytecode behavior was recovered for this batch.</p>
-            )}
-          </div>
+          <EvidenceLedger findings={report.findings} />
         </div>
       )}
 
@@ -232,21 +246,34 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
 }
 
 function App() {
-  const { state, analyze, cancel } = useAnalyzer()
+  const { state, discover, analyze, cancel } = useAnalyzer()
   const [chainId, setChainId] = useState(1)
   const [token, setToken] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (
     typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   ))
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const selectedChain = useMemo(() => CHAINS.find((chain) => chain.id === chainId)!, [chainId])
-  const busy = state.status === 'cache' || state.status === 'running'
+  const busy = state.status === 'discovering' || state.status === 'cache' || state.status === 'running'
+  const informationPage = typeof window === 'undefined' ? undefined : informationPageForPath(window.location.pathname)
+  const visiblePoolSelection = state.poolSelection
+    && state.poolSelection.chainId === chainId
+    && state.poolSelection.token.toLowerCase() === token.trim().toLowerCase()
+    ? state.poolSelection
+    : undefined
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     document.documentElement.style.colorScheme = theme
-  }, [theme])
+    document.title = informationPage === 'how'
+      ? 'How Hookscope works — Hookscope'
+      : informationPage === 'methodology'
+        ? 'Methodology — Hookscope'
+        : 'Hookscope — Uniswap v4 hook analyzer'
+  }, [informationPage, theme])
 
-  const submit = (force = false, cursor?: string) => analyze({ chainId, token, force, poolCursor: cursor })
+  const findPools = () => discover({ chainId, token })
+  const continuePools = (cursor: string) => analyze({ chainId, token, force: true, poolCursor: cursor })
   const loadFixture = () => {
     setChainId(1)
     setToken(FIXTURE_SCAN_ADDRESS)
@@ -255,13 +282,27 @@ function App() {
   return (
     <div className="app-shell">
       <header className="site-header">
-        <a className="brand" href="#top"><span className="brand-mark"><i /><i /><i /></span>Hookscope</a>
+        <a className="brand" href="/">
+          <span className="brand-mark" aria-hidden="true">
+            <img src="/brand/hookscope-transparent-v2-192.png" alt="" width="34" height="34" />
+          </span>
+          Hookscope
+        </a>
         <div className="header-actions">
           <nav aria-label="Primary navigation">
-            <a href="#method">How it works</a>
-            <a href="/docs/V4_HOOK_ANALYZER_ARCHITECTURE.md" target="_blank">Methodology</a>
+            <a href="/how" aria-current={informationPage === 'how' ? 'page' : undefined}>How it works</a>
+            <a href="/methodology" aria-current={informationPage === 'methodology' ? 'page' : undefined}>Methodology</a>
             <a href="https://github.com/Uniswap/v4-core" target="_blank" rel="noreferrer">v4 Core <ExternalLink size={12} /></a>
           </nav>
+          <button
+            type="button"
+            className="header-icon-button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open network settings"
+            title="Network settings"
+          >
+            <Settings size={15} />
+          </button>
           <button
             type="button"
             className="theme-toggle"
@@ -274,13 +315,17 @@ function App() {
         </div>
       </header>
 
-      <main id="top">
+      <RpcSettingsDialog open={settingsOpen} chains={CHAINS} onClose={() => setSettingsOpen(false)} />
+
+      {informationPage === 'how' && <HowItWorksPage />}
+      {informationPage === 'methodology' && <MethodologyPage />}
+      {!informationPage && <main id="top">
         <section className="hero">
           <p className="kicker"><Activity size={14} /> Uniswap v4 execution transparency</p>
           <h1>See what a hook actually does.</h1>
           <p className="hero-copy">Enter a token. Hookscope finds its v4 pools, maps callback and control mechanics, and records the exact evidence behind every claim—inside your browser.</p>
 
-          <form className="scan-form" onSubmit={(event) => { event.preventDefault(); submit(false) }}>
+          <form className="scan-form" onSubmit={(event) => { event.preventDefault(); findPools() }}>
             <label>
               <span>Chain</span>
               <ChainDropdown chains={CHAINS} value={chainId} onChange={setChainId} disabled={busy} />
@@ -289,7 +334,7 @@ function App() {
               <span>Token address</span>
               <input value={token} onChange={(event) => setToken(event.target.value)} placeholder="0x…" spellCheck={false} autoComplete="off" disabled={busy} />
             </label>
-            <button className="primary-button analyze-button" type="submit" disabled={busy || !token}>Analyze token <ArrowRight size={15} /></button>
+            <button className="primary-button analyze-button" type="submit" disabled={busy || !token}>Find pools <ArrowRight size={15} /></button>
           </form>
           <div className="form-meta">
             <span>No wallet · pinned block · browser workers</span>
@@ -299,9 +344,22 @@ function App() {
           {state.error && <div className="form-error" role="alert">{state.error}</div>}
         </section>
 
+        {state.status === 'selecting' && visiblePoolSelection && (
+          <PoolPicker
+            key={`${visiblePoolSelection.chainId}:${visiblePoolSelection.token}:${visiblePoolSelection.block.hash}`}
+            discovery={visiblePoolSelection}
+            onAnalyze={(selectedPoolIds) => analyze({
+              chainId,
+              token,
+              poolSelection: visiblePoolSelection,
+              selectedPoolIds,
+            })}
+          />
+        )}
+
         {busy && (
           <section className="running-panel" aria-live="polite">
-            <div><p className="eyebrow">Browser analysis in progress</p><h2>{state.detail}</h2></div>
+            <div><p className="eyebrow">{state.status === 'discovering' ? 'Loading verified pool choices' : 'Browser analysis in progress'}</p><h2>{state.detail}</h2></div>
             <button className="stop-button" onClick={cancel}><CircleStop size={15} /> Cancel</button>
             <div className="progress-track"><span style={{ width: `${state.progress}%` }} /></div>
             <div className="live-phases">{state.phases.map((phase) => <span className={phase.status} key={phase.id}>{phase.label}</span>)}</div>
@@ -309,9 +367,9 @@ function App() {
         )}
 
         {state.status === 'cancelled' && <div className="state-message"><CircleStop size={16} /><span><b>Run cancelled.</b> No partial report was submitted.</span></div>}
-        {state.report && <ReportView report={state.report} history={state.history} currentnessStatus={state.currentnessStatus} currentness={state.currentness} theme={theme} onRunAgain={() => submit(true)} onContinue={(cursor) => submit(true, cursor)} />}
+        {state.report && <ReportView report={state.report} history={state.history} currentnessStatus={state.currentnessStatus} currentness={state.currentness} theme={theme} onRunAgain={findPools} onContinue={continuePools} />}
 
-        {!state.report && !busy && state.status !== 'cancelled' && (
+        {!state.report && !busy && state.status !== 'cancelled' && state.status !== 'selecting' && (
           <section className="method-strip" id="method">
             <div><span>01</span><h3>Discover</h3><p>Verify every v4 PoolId that contains the selected token.</p></div>
             <div><span>02</span><h3>Map</h3><p>Resolve hook code identities, callbacks, control paths, and state access.</p></div>
@@ -319,7 +377,7 @@ function App() {
             <div><span>04</span><h3>Record</h3><p>Publish only complete reports with explicit capability limits.</p></div>
           </section>
         )}
-      </main>
+      </main>}
 
       <footer><span>Hookscope · protocol mechanics, with evidence</span><span>Runs locally in the browser</span></footer>
     </div>

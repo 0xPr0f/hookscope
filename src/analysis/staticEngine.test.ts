@@ -106,8 +106,7 @@ describe('EVMole-derived contract surface', () => {
     const result = withEngine({
       controlFlowGraph: {
         blocks: [
-          { id: 0, start: 0, end: 4, type: 'Jumpi', data: {} },
-          { id: 1, start: 5, end: 9, type: 'DynamicJump', data: {} },
+          { id: 0, start: 0, end: 4, type: 'DynamicJump', data: {} },
         ],
       },
     })
@@ -115,6 +114,46 @@ describe('EVMole-derived contract surface', () => {
     expect(finding.evidenceClass).toBe('static-reachability')
     expect(finding.confidence).toBe('supported')
     expect(finding.claim).toContain('under-approximates')
+  })
+
+  it('does not describe a resolved computed jump as unresolved', () => {
+    const result = withEngine({
+      controlFlowGraph: {
+        blocks: [
+          { id: 0, start: 0, end: 4, type: 'DynamicJump', data: { to: [{ path: [], to: 5 }] } },
+          { id: 5, start: 5, end: 9, type: 'Terminate' },
+        ],
+      },
+    })
+    expect(result.findings.some((item) => item.detectorId === 'evmole-unresolved-control-flow')).toBe(false)
+  })
+
+  it('classifies every delegated-call occurrence, not only the first', () => {
+    const result = withEngine({
+      functions: [{ selector: 'aabbccdd', bytecodeOffset: 10, dispatch: 'abi', stateMutability: 'nonpayable' }],
+      disassembled: [[1, 'DELEGATECALL'], [10, 'DELEGATECALL']],
+      controlFlowGraph: {
+        blocks: [
+          { id: 0, start: 0, end: 0, type: 'Terminate' },
+          { id: 10, start: 10, end: 10, type: 'Terminate' },
+        ],
+      },
+    })
+    const delegated = result.findings.filter((item) =>
+      item.detectorId === 'delegatecall-opcode-present' || item.detectorId === 'cfg-reachable-delegatecall')
+    expect(delegated.map((item) => [item.programCounter, item.detectorId])).toEqual([
+      [1, 'delegatecall-opcode-present'],
+      [10, 'cfg-reachable-delegatecall'],
+    ])
+  })
+
+  it('does not claim a dead CALL is reachable', () => {
+    const result = withEngine({
+      disassembled: [[1, 'CALL']],
+      controlFlowGraph: { blocks: [{ id: 0, start: 0, end: 0, type: 'Terminate' }] },
+    })
+    expect(result.findings.find((item) => item.detectorId === 'external-call-surface')).toBeUndefined()
+    expect(result.findings.find((item) => item.detectorId === 'call-opcode-present')?.programCounter).toBe(1)
   })
 
   it('stays silent when the contract has none of these traits', () => {

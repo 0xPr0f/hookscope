@@ -231,50 +231,64 @@ export async function attachInitializationTransactions(
   const pending = pools
     .map((pool, index) => ({ pool, index }))
     .filter(({ pool }) => !pool.transactionHash)
+  const groups = new Map<string, typeof pending>()
+  for (const item of pending) {
+    const key = item.pool.initializedAtBlock
+    const existing = groups.get(key) ?? []
+    existing.push(item)
+    groups.set(key, existing)
+  }
+  const blocks = [...groups.entries()]
   let requests = 0
   let unresolved = 0
   let cursor = 0
 
   const run = async () => {
-    while (cursor < pending.length) {
+    while (cursor < blocks.length) {
       if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError')
-      const item = pending[cursor]
+      const group = blocks[cursor]
       cursor += 1
-      if (!item) continue
-      const blockNumber = BigInt(item.pool.initializedAtBlock)
+      if (!group) continue
+      const [initializedAtBlock, items] = group
+      const blockNumber = BigInt(initializedAtBlock)
       try {
         const logs = await client.getLogs({
           address: poolManager,
           event: INITIALIZE_EVENT,
-          args: { id: item.pool.poolId },
           fromBlock: blockNumber,
           toBlock: blockNumber,
         })
         requests += 1
-        const observed = logs.map(poolFromLog).find((pool) => pool?.poolId.toLowerCase() === item.pool.poolId.toLowerCase())
-        if (!observed) {
-          unresolved += 1
-          continue
-        }
-        result[item.index] = {
-          ...item.pool,
-          transactionHash: observed.transactionHash,
-          replayTransactions: observed.transactionHash
-            ? [
-                ...(item.pool.replayTransactions ?? []).filter((reference) => reference.kind !== 'initialize'),
-                { kind: 'initialize', transactionHash: observed.transactionHash, blockNumber: blockNumber.toString() },
-              ]
-            : item.pool.replayTransactions,
+        const observedById = new Map(logs.flatMap((log) => {
+          const observed = poolFromLog(log)
+          return observed ? [[observed.poolId.toLowerCase(), observed] as const] : []
+        }))
+        for (const item of items) {
+          const observed = observedById.get(item.pool.poolId.toLowerCase())
+          if (!observed) {
+            unresolved += 1
+            continue
+          }
+          result[item.index] = {
+            ...item.pool,
+            transactionHash: observed.transactionHash,
+            replayTransactions: observed.transactionHash
+              ? [
+                  ...(item.pool.replayTransactions ?? []).filter((reference) => reference.kind !== 'initialize'),
+                  { kind: 'initialize', transactionHash: observed.transactionHash, blockNumber: blockNumber.toString() },
+                ]
+              : item.pool.replayTransactions,
+          }
         }
       } catch (error) {
         if (signal?.aborted) throw error
         requests += 1
-        unresolved += 1
+        unresolved += items.length
       }
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, () => run()))
+  await Promise.all(Array.from({ length: Math.min(4, blocks.length) }, () => run()))
   return { pools: result, requests, unresolved }
 }
 

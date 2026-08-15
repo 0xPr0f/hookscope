@@ -23,8 +23,6 @@ export type PoolReplayCandidate = {
   }
 }
 
-export type InitializationReplayCandidate = PoolReplayCandidate & { kind: 'initialize' }
-
 export function replayReferencesForPool(pool: PoolDescriptor): PoolReplayReference[] {
   const references: PoolReplayReference[] = pool.transactionHash
     ? [{ kind: 'initialize', transactionHash: pool.transactionHash, blockNumber: pool.initializedAtBlock }]
@@ -112,15 +110,4 @@ export async function loadPoolReplayCandidate(
       logCount: receipt.logs.length,
     },
   }
-}
-
-export async function loadInitializationReplayCandidate(
-  client: PublicClient,
-  chainId: number,
-  poolManager: Address,
-  pool: PoolDescriptor,
-): Promise<InitializationReplayCandidate> {
-  const reference = replayReferencesForPool(pool).find((candidate) => candidate.kind === 'initialize')
-  if (!reference) throw new Error('The pool Initialize event has no transaction hash.')
-  return await loadPoolReplayCandidate(client, chainId, poolManager, pool, reference) as InitializationReplayCandidate
 }

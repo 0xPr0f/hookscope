@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Hookscope — Uniswap v4 hook analyzer",
+  "short_name": "Hookscope",
+  "description": "Trace Uniswap v4 hook permissions, code paths, and simulated pool behavior in your browser.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "background_color": "#171714",
+  "theme_color": "#171714",
+  "categories": ["developer", "finance", "utilities"],
+  "icons": [
+    {
+      "src": "/brand/hookscope-transparent-v2-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/hookscope-transparent-v2-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/hookscope-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -26,7 +26,21 @@ describe('completed report pipeline identity', () => {
       'hacken-live-router-context/0.4.0',
       'hacken-live-router-context/0.5.0',
       'hacken-live-router-context/0.6.0',
+      'hacken-live-router-context/0.10.0',
       'hacken-live-router-context/0.7.0',
+      'hacken-live-router-context/0.8.0',
+      'hacken-live-router-context/0.9.0',
+      'hacken-live-router-context/0.11.0',
+      'hacken-live-router-context/0.12.0',
+      'hacken-live-router-context/0.13.0',
+      'hacken-live-router-context/0.14.0',
+      'hacken-live-router-context/0.15.0',
+      'hacken-live-router-context/0.16.0',
+      'hacken-live-router-context/0.17.0',
+      'hacken-live-router-context/0.18.0',
+      'hacken-live-router-context/0.19.0',
+      'hacken-live-router-context/0.20.0',
+      'hacken-live-router-context/0.21.0',
     ]) {
       expect(superseded, 'a superseded version must not equal the current one').not.toBe(LIVE_SCENARIO_VERSION)
       expect(reportMatchesCurrentPipeline({ ...report, scenarioVersion: superseded }, false), superseded).toBe(false)

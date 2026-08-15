@@ -84,6 +84,23 @@ contract GenerateBrowserFixture is Script {
             ModifyLiquidityParams({tickLower: -240, tickUpper: 240, liquidityDelta: 1e18, salt: 0}),
             bytes("")
         );
+
+        // A native/token pool is part of the browser fixture as a conformance
+        // target for the real-token lane. It is created after the original two
+        // pools so their deployed addresses and identities remain stable.
+        PoolKey memory nativeKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(address(token0)),
+            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing: 60,
+            hooks: IHooks(HOOK_ADDRESS)
+        });
+        manager.initialize(nativeKey, SQRT_PRICE_1_1);
+        liquidityRouter.modifyLiquidity{value: 10 ether}(
+            nativeKey,
+            ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: 0}),
+            bytes("")
+        );
         vm.stopPrank();
 
         hook.configureSwapFee(3000);
@@ -106,6 +123,9 @@ contract GenerateBrowserFixture is Script {
         vm.serializeBytes32(fixture, "poolId", PoolId.unwrap(key.toId()));
         vm.serializeBytes32(fixture, "secondaryPoolId", PoolId.unwrap(secondaryKey.toId()));
         vm.serializeInt(fixture, "secondaryTickSpacing", secondaryKey.tickSpacing);
+        vm.serializeAddress(fixture, "nativeCurrency0", Currency.unwrap(nativeKey.currency0));
+        vm.serializeAddress(fixture, "nativeCurrency1", Currency.unwrap(nativeKey.currency1));
+        vm.serializeBytes32(fixture, "nativePoolId", PoolId.unwrap(nativeKey.toId()));
         string memory json = vm.serializeString(fixture, "sqrtPriceX96", vm.toString(SQRT_PRICE_1_1));
         vm.writeJson(json, "src/fixtures/generated/hacken-context.json");
         vm.dumpState("src/fixtures/generated/hacken-state.json");

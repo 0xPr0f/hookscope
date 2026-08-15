@@ -28,7 +28,8 @@ use revm::{
     inspector::{InspectEvm, Inspector},
     interpreter::{
         interpreter_types::{InputsTr, Jumps, StackTr},
-        CallInput, CallInputs, CallOutcome, Interpreter, InterpreterTypes,
+        CallInput, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter,
+        InterpreterTypes,
     },
     primitives::{Address, Bytes, Log, TxKind, U256},
     state::{
@@ -78,7 +79,9 @@ pub extern "C" fn external_current_millis() -> u64 {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StepEvidence {
+    frame_id: u64,
     address: String,
+    storage_address: String,
     pc: usize,
     opcode: String,
 }
@@ -86,6 +89,10 @@ struct StepEvidence {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CallEvidence {
+    frame_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_frame_id: Option<u64>,
+    depth: usize,
     caller: String,
     target: String,
     bytecode_address: String,
@@ -105,7 +112,9 @@ struct CallEvidence {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StorageAccessEvidence {
+    frame_id: u64,
     address: String,
+    storage_address: String,
     pc: usize,
     opcode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +158,8 @@ struct EvidenceInspector {
     selfdestructs: Vec<(String, String, String)>,
     truncated: bool,
     step_limit: usize,
+    frame_stack: Vec<u64>,
+    next_frame_id: u64,
 }
 
 impl Default for EvidenceInspector {
@@ -168,7 +179,25 @@ impl EvidenceInspector {
             selfdestructs: Vec::new(),
             truncated: false,
             step_limit: step_limit.clamp(64, MAX_STEP_EVENTS),
+            frame_stack: Vec::new(),
+            next_frame_id: 1,
         }
+    }
+
+    /// Opens one execution frame and returns its stable identity, parent and
+    /// zero-based depth. Calls and creates share the same stack so storage inside
+    /// a constructor cannot accidentally inherit the surrounding call's frame.
+    fn push_frame(&mut self) -> (u64, Option<u64>, usize) {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id = self.next_frame_id.saturating_add(1);
+        let parent_frame_id = self.frame_stack.last().copied();
+        let depth = self.frame_stack.len();
+        self.frame_stack.push(frame_id);
+        (frame_id, parent_frame_id, depth)
+    }
+
+    fn pop_frame(&mut self) {
+        self.frame_stack.pop();
     }
 }
 
@@ -200,8 +229,11 @@ where
             .bytecode_address()
             .copied()
             .unwrap_or_else(|| interp.input.target_address());
+        let frame_id = self.frame_stack.last().copied().unwrap_or(0);
         let event = StepEvidence {
+            frame_id,
             address: format!("{bytecode_address:?}"),
+            storage_address: format!("{:?}", interp.input.target_address()),
             pc: interp.bytecode.pc(),
             opcode: OpCode::new(opcode_byte)
                 .map(|value| format!("{value}"))
@@ -216,7 +248,9 @@ where
             let stack = interp.stack.data();
             let writes = matches!(opcode_byte, opcode::SSTORE | opcode::TSTORE);
             self.storage_operations.push(StorageAccessEvidence {
+                frame_id,
                 address: event.address.clone(),
+                storage_address: event.storage_address.clone(),
                 pc: event.pc,
                 opcode: event.opcode.clone(),
                 slot: stack.last().map(|slot| format!("0x{slot:064x}")),
@@ -240,7 +274,11 @@ where
 
     fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         let selector = call_selector(&inputs.input, context);
+        let (frame_id, parent_frame_id, depth) = self.push_frame();
         self.calls.push(CallEvidence {
+            frame_id,
+            parent_frame_id,
+            depth,
             caller: format!("{:?}", inputs.caller),
             target: format!("{:?}", inputs.target_address),
             bytecode_address: format!("{:?}", inputs.bytecode_address),
@@ -250,6 +288,24 @@ where
             selector,
         });
         None
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
+        self.pop_frame();
+    }
+
+    fn create(&mut self, _context: &mut CTX, _inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.push_frame();
+        None
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        _outcome: &mut CreateOutcome,
+    ) {
+        self.pop_frame();
     }
 
     fn log(&mut self, _context: &mut CTX, log: Log) {
