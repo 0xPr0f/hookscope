@@ -32,8 +32,8 @@ if (vercel) {
   check(vercel.outputDirectory === 'dist', 'vercel.json must publish dist/.')
   check(vercel.functions?.['api/**/*.ts']?.maxDuration === 10, 'Storage functions must have a 10-second maximum duration.')
   check(
-    vercel.rewrites?.some((rewrite) => rewrite.source.includes('(?!api/)') && rewrite.destination === '/index.html'),
-    'The SPA rewrite must exclude /api routes.',
+    vercel.rewrites?.some((rewrite) => rewrite.source.includes('api/') && rewrite.source.includes('assets/') && rewrite.destination === '/index.html'),
+    'The SPA rewrite must exclude /api and /assets routes.',
   )
   check(!JSON.stringify(vercel).includes('DATABASE_URL'), 'vercel.json must not contain DATABASE_URL or its secret value.')
 }

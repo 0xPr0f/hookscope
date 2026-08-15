@@ -24,3 +24,17 @@ test('Vercel API relative ESM imports name their emitted .js files', async () =>
     }
   }
 })
+
+test('stale lazy chunks recover once and missing assets never receive the SPA document', async () => {
+  const html = await readFile(new URL('index.html', project), 'utf8')
+  const vercel = JSON.parse(await readFile(new URL('vercel.json', project), 'utf8'))
+
+  assert.match(html, /vite:preloadError/u)
+  assert.match(html, /event\.preventDefault\(\)/u)
+  assert.match(html, /location\.replace\(next\)/u)
+  assert.match(html, /recoveredEntry === entry/u)
+
+  const spaRewrite = vercel.rewrites.find((rewrite) => rewrite.destination === '/index.html')
+  assert.match(spaRewrite?.source ?? '', /api\//u)
+  assert.match(spaRewrite?.source ?? '', /assets\//u)
+})

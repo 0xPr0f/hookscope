@@ -38,6 +38,31 @@
         }
       })()
     </script>
+    <script>
+      (() => {
+        // An open tab can outlive a deployment. Its entry bundle may then ask
+        // the new deployment for an old lazy chunk that no longer exists.
+        // Vite emits this event before rejecting the dynamic import, giving us
+        // one safe opportunity to move the tab onto the current asset manifest.
+        const recoveryParameter = '__hookscope_asset_reload'
+        const loadedUrl = new URL(location.href)
+        const recoveredEntry = loadedUrl.searchParams.get(recoveryParameter)
+        if (recoveredEntry) {
+          loadedUrl.searchParams.delete(recoveryParameter)
+          history.replaceState(history.state, '', loadedUrl)
+        }
+
+        window.addEventListener('vite:preloadError', (event) => {
+          const entry = Array.from(document.scripts)
+            .find((script) => script.type === 'module' && script.src)?.src
+          if (!entry || recoveredEntry === entry) return
+          event.preventDefault()
+          const next = new URL(location.href)
+          next.searchParams.set(recoveryParameter, entry)
+          location.replace(next)
+        })
+      })()
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/png" sizes="32x32" href="/brand/hookscope-transparent-v2-32.png" />
     <link rel="icon" type="image/png" sizes="48x48" href="/brand/hookscope-transparent-v2-48.png" />
