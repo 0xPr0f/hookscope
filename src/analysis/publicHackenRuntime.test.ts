@@ -22,6 +22,7 @@ const PERMISSION_OUTPUTS = Array.from({ length: 14 }, () => ({ type: 'bool' as c
 const GET_PERMISSIONS = toFunctionSelector('getHookPermissions()')
 const GET_POOL_MANAGER = toFunctionSelector('poolManager()')
 const SUPPORTS_INTERFACE = toFunctionSelector('supportsInterface(bytes4)')
+const NOT_POOL_MANAGER = toFunctionSelector('NotPoolManager()')
 const BEFORE_SWAP = toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)')
 const UNLOCK = '0x48c89491' as Hex
 
@@ -147,7 +148,12 @@ function secondarySwapProof() {
   })
 }
 
-function session(options: { permissions?: boolean[]; directSucceeds?: boolean; throwSelectors?: Hex[] } = {}) {
+function session(options: {
+  permissions?: boolean[]
+  directSucceeds?: boolean
+  directRevert?: Hex
+  throwSelectors?: Hex[]
+} = {}) {
   const calls: Hex[] = []
   const permissions = options.permissions ?? [false, false, false, false, false, false, true, false, false, false, false, false, false, false]
   return {
@@ -169,7 +175,7 @@ function session(options: { permissions?: boolean[]; directSucceeds?: boolean; t
       return proof({
         success: Boolean(options.directSucceeds),
         calls: [call(HOOK, selector)],
-        output: options.directSucceeds ? '0x' : '0xdeadbeef',
+        output: options.directSucceeds ? '0x' : options.directRevert ?? NOT_POOL_MANAGER,
       })
     },
   }
@@ -223,6 +229,20 @@ describe('public Hacken runtime adaptations', () => {
     expect(probes.find((item) => item.caseId === 'only-pool-manager')).toMatchObject({
       status: 'failed',
       observedOutcome: 'completed',
+    })
+  })
+
+  it('records an unrelated direct revert without attributing it to PoolManager authorization', async () => {
+    const probes = await runPublicHackenRuntimeProbes({
+      session: session({ directRevert: '0xdeadbeef' }),
+      context,
+      pools: [primary],
+      outcomes: [mediatedBeforeSwapOutcome()],
+      signal: new AbortController().signal,
+    })
+    expect(probes.find((item) => item.caseId === 'only-pool-manager')).toMatchObject({
+      status: 'observed',
+      observedOutcome: 'reverted',
     })
   })
 

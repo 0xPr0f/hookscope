@@ -51,6 +51,7 @@ function report(): AnalysisReport {
         hookRuntime: [
           { selector: toFunctionSelector('getHookPermissions()') },
           { selector: toFunctionSelector('poolManager()') },
+          { selector: toFunctionSelector('NotPoolManager()') },
           { selector: toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)') },
         ],
       },
@@ -71,6 +72,7 @@ describe('report-wide selector catalog', () => {
       '0x12345678',
       toFunctionSelector('getHookPermissions()'),
       toFunctionSelector('poolManager()'),
+      toFunctionSelector('NotPoolManager()'),
       toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)'),
     ]))
   })
@@ -94,6 +96,8 @@ describe('report-wide selector catalog', () => {
       .toMatchObject({ name: 'transfer(address,uint256)', source: 'canonical-interface' })
     expect(resolveSelectorSignature(result.lookup, toFunctionSelector('getHookPermissions()'))?.candidate)
       .toMatchObject({ name: 'getHookPermissions()', source: 'canonical-interface' })
+    expect(resolveSelectorSignature(result.lookup, toFunctionSelector('NotPoolManager()'))?.candidate)
+      .toMatchObject({ name: 'NotPoolManager()', source: 'canonical-interface' })
     expect(resolveSelectorSignature(result.lookup, toFunctionSelector('beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)'))?.candidate)
       .toMatchObject({
         name: 'beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)',

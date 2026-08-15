@@ -36,6 +36,8 @@ const CANONICAL_SIGNATURES = [
   'getHookPermissions()',
   'poolManager()',
   'supportsInterface(bytes4)',
+  'NotPoolManager()',
+  'HookNotImplemented()',
   'beforeInitialize(address,(address,address,uint24,int24,address),uint160)',
   'afterInitialize(address,(address,address,uint24,int24,address),uint160,int24)',
   'beforeAddLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)',

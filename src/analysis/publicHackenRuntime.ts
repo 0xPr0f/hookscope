@@ -36,6 +36,7 @@ const ZERO_BYTES32 = `0x${'0'.repeat(64)}` as Hex
 
 const GET_HOOK_PERMISSIONS_SELECTOR = toFunctionSelector('getHookPermissions()')
 const POOL_MANAGER_SELECTOR = toFunctionSelector('poolManager()')
+const NOT_POOL_MANAGER_SELECTOR = toFunctionSelector('NotPoolManager()')
 const SUPPORTS_INTERFACE_ABI = parseAbi(['function supportsInterface(bytes4 interfaceId) view returns (bool)'])
 
 const POOL_KEY = 'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }'
@@ -581,6 +582,7 @@ async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<Pub
     outcome: 'reverted' | 'completed' | 'error'
     gasUsed?: number
     output?: Hex
+    rejection?: 'not-pool-manager' | 'other'
     reason?: string
     executed: boolean
     mediatedScenarioIds: string[]
@@ -610,6 +612,9 @@ async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<Pub
         outcome: replay.proof.success ? 'completed' : 'reverted',
         gasUsed: replay.proof.gasUsed,
         output: replay.proof.output,
+        rejection: !replay.proof.success && replay.proof.output.slice(0, 10).toLowerCase() === NOT_POOL_MANAGER_SELECTOR
+          ? 'not-pool-manager'
+          : !replay.proof.success ? 'other' : undefined,
         executed: true,
         mediatedScenarioIds: callback.mediatedScenarioIds,
       })
@@ -628,12 +633,13 @@ async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<Pub
 
   const completed = observations.filter((item) => item.outcome === 'completed')
   const reverted = observations.filter((item) => item.outcome === 'reverted')
+  const guarded = reverted.filter((item) => item.rejection === 'not-pool-manager')
   const errors = observations.filter((item) => item.outcome === 'error')
   const status: PublicHackenRuntimeProbe['status'] = errors.length
     ? 'error'
     : completed.length
       ? 'failed'
-      : unpaired.length
+      : unpaired.length || guarded.length !== reverted.length
         ? 'observed'
         : 'passed'
   const reason = errors.length
@@ -641,8 +647,10 @@ async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<Pub
     : completed.length
       ? `${completed.length}/${observations.length} callbacks that had completed through the PoolManager also completed when called directly by a non-PoolManager account.`
       : unpaired.length
-        ? `${reverted.length} callback${reverted.length === 1 ? '' : 's'} completed through the PoolManager and rejected the comparable direct call; ${unpaired.length} enabled callback${unpaired.length === 1 ? '' : 's'} lacked a successful mediated execution, so full callback compatibility was not asserted.`
-        : `All ${reverted.length} enabled callbacks first completed through the deployed PoolManager and then rejected the comparable direct non-PoolManager call. This is bounded execution compatibility, not an inference about the hook's source-level guard.`
+        ? `${guarded.length}/${reverted.length} compared callback${reverted.length === 1 ? '' : 's'} returned the canonical NotPoolManager() rejection after completing through the PoolManager; ${unpaired.length} enabled callback${unpaired.length === 1 ? '' : 's'} lacked a successful mediated execution, so full callback compatibility was not asserted.`
+        : guarded.length !== reverted.length
+          ? `${reverted.length} callbacks completed through the PoolManager and rejected the direct call, but only ${guarded.length} returned the canonical NotPoolManager() error. Other reverts were recorded without attributing them to authorization.`
+          : `All ${guarded.length} enabled callbacks first completed through the deployed PoolManager and then returned the canonical NotPoolManager() error to the direct caller. This is bounded execution compatibility, not an inference about every possible input or source-level guard.`
 
   return {
     ...base,
@@ -663,6 +671,10 @@ async function callbackAuthorizationProbe(input: RuntimeProbeInput): Promise<Pub
         permission: callback.permission,
         selector: callback.selector,
       })),
+      expectedAuthorizationError: {
+        selector: NOT_POOL_MANAGER_SELECTOR,
+        signature: 'NotPoolManager()',
+      },
     },
   }
 }
