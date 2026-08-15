@@ -23,6 +23,7 @@ use libafl_bolts::{
 };
 use revm::{
     context::{Context, TxEnv},
+    context_interface::{ContextTr, LocalContextTr},
     database::{BenchmarkDB, BENCH_CALLER, BENCH_TARGET},
     inspector::{InspectEvm, Inspector},
     interpreter::{
@@ -91,8 +92,11 @@ struct CallEvidence {
     scheme: String,
     value: String,
     input_length: usize,
-    /// Four-byte selector when the call input is owned bytes. A shared-buffer
-    /// input is left unresolved rather than reconstructed from interpreter memory.
+    /// First four bytes of the call input, for both owned and shared-buffer
+    /// inputs. Nested calls almost always use the shared buffer, so leaving
+    /// those unresolved would hide the selectors that identify a router's
+    /// call path. Only the four bytes are read; full nested calldata is not
+    /// retained.
     #[serde(skip_serializing_if = "Option::is_none")]
     selector: Option<String>,
 }
@@ -168,8 +172,24 @@ impl EvidenceInspector {
     }
 }
 
+/// Reads a call's four-byte selector without copying the rest of its input.
+///
+/// A shared-buffer input is a range into the caller's memory, so the four
+/// leading bytes are sliced directly instead of materializing the whole call.
+fn call_selector<CTX: ContextTr>(input: &CallInput, context: &CTX) -> Option<String> {
+    match input {
+        CallInput::Bytes(bytes) if bytes.len() >= 4 => Some(format!("0x{}", hex::encode(&bytes[..4]))),
+        CallInput::SharedBuffer(range) if range.len() >= 4 => context
+            .local()
+            .shared_memory_buffer_slice(range.start..range.start + 4)
+            .map(|head| format!("0x{}", hex::encode(&*head))),
+        _ => None,
+    }
+}
+
 impl<CTX, INTR> Inspector<CTX, INTR> for EvidenceInspector
 where
+    CTX: ContextTr,
     INTR: InterpreterTypes,
     INTR::Bytecode: Jumps,
 {
@@ -218,7 +238,8 @@ where
         }
     }
 
-    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        let selector = call_selector(&inputs.input, context);
         self.calls.push(CallEvidence {
             caller: format!("{:?}", inputs.caller),
             target: format!("{:?}", inputs.target_address),
@@ -226,12 +247,7 @@ where
             scheme: format!("{:?}", inputs.scheme),
             value: inputs.transfer_value().unwrap_or(U256::ZERO).to_string(),
             input_length: inputs.input.len(),
-            selector: match &inputs.input {
-                CallInput::Bytes(bytes) if bytes.len() >= 4 => {
-                    Some(format!("0x{}", hex::encode(&bytes[..4])))
-                }
-                _ => None,
-            },
+            selector,
         });
         None
     }

@@ -17,11 +17,19 @@ import {
   type ForkHydrationRequest,
   type RevmExplorationWitness,
 } from './revmProof'
+import { deriveUniswapV4MutationMask } from './uniswapV4MutationMask'
 import {
-  deriveUniswapV4MutationMask,
-  uniswapV4MutationDistance,
-  type UniswapV4MutationMask,
-} from './uniswapV4MutationMask'
+  deriveCustomRouterMutationMask,
+  mutationDistance,
+  type HistoricalRouterMutationMask,
+  type OfficialRouterMutationMask,
+} from './historicalRouterMutationMask'
+import {
+  contextKey,
+  customRouterTechnical,
+  type HistoricalRouterContext,
+  type HistoricalRouterContexts,
+} from '../data/historicalRouterContext'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
@@ -36,7 +44,9 @@ const MAX_EXCHANGED_SEEDS = 64
 const MIN_ROUND_MS = 1_000
 const DEFAULT_POOL_CEILING = 3
 
-export const LIVE_FORK_EXPLORATION_STRATEGY = 'libafl-masked-router-fork-rounds/0.1.0'
+// 0.2.0: targets may now come from a recognized custom router template, and the
+// corpus validator and distance function are dispatched by the mask's codec.
+export const LIVE_FORK_EXPLORATION_STRATEGY = 'libafl-masked-router-fork-rounds/0.2.0'
 
 export type LiveForkExplorationRound = {
   round: number
@@ -63,6 +73,8 @@ export type LiveForkExplorationMaskSummary = {
 export type LiveForkExplorationOutcome = {
   poolId: Hex
   hook: Address
+  /** Present when this target came from a recognized custom router template. */
+  recognizedTemplate?: HistoricalRouterContext
   actor?: Address
   router?: Address
   transactionHash?: Hex
@@ -107,10 +119,24 @@ type SessionFactory = (input: { scanId: string; client: PublicClient; stateBlock
 export type LiveForkExplorationTarget = {
   pool: PoolDescriptor
   candidate: PoolReplayCandidate
-  mask: UniswapV4MutationMask
+  mask: HistoricalRouterMutationMask
+  /** Present when this target came from a recognized custom router template. */
+  recognizedTemplate?: HistoricalRouterContext
 }
 
-function maskSummary(mask: UniswapV4MutationMask): LiveForkExplorationMaskSummary {
+function maskSummary(mask: HistoricalRouterMutationMask): LiveForkExplorationMaskSummary {
+  if (mask.codec !== 'official') {
+    return {
+      calldataBytes: mask.calldataBytes,
+      mutableBytes: mask.byteIndices.length,
+      operationsSeen: 1,
+      operationsSelected: 1,
+      // Named exactly, so evidence never says "amount and hookData" for an
+      // envelope that carries no hook data at all.
+      fields: mask.fields.map((field) => ({ field, operationKind: 'custom-v4-unlock-swap', bytes: mask.byteIndices.length })),
+      truncated: false,
+    }
+  }
   return {
     calldataBytes: mask.calldataBytes,
     mutableBytes: mask.byteIndices.length,
@@ -133,7 +159,7 @@ function maskSummary(mask: UniswapV4MutationMask): LiveForkExplorationMaskSummar
  * resolved from pinned chain state rather than from calldata, so calldata alone
  * cannot establish that mutating them exercises the selected pool.
  */
-export function poolScopedMutationMask(poolId: Hex, calldata: Hex): UniswapV4MutationMask | null {
+export function poolScopedMutationMask(poolId: Hex, calldata: Hex): OfficialRouterMutationMask | null {
   const decoded = decodeUniswapV4Calldata(calldata)
   if (!decoded) return null
   const matching = new Set(
@@ -146,7 +172,7 @@ export function poolScopedMutationMask(poolId: Hex, calldata: Hex): UniswapV4Mut
     maxMutableBytes: MAX_MUTABLE_BYTES,
     keepOperation: (_located, operationIndex) => matching.has(operationIndex),
   })
-  return mask && mask.byteIndices.length > 0 ? mask : null
+  return mask && mask.byteIndices.length > 0 ? { ...mask, codec: 'official' } : null
 }
 
 /**
@@ -157,6 +183,7 @@ export function poolScopedMutationMask(poolId: Hex, calldata: Hex): UniswapV4Mut
 export function selectForkExplorationTargets(input: {
   pools: PoolDescriptor[]
   replay: LivePoolReplayCoverage
+  routerContexts?: HistoricalRouterContexts
 }): LiveForkExplorationTarget[] {
   const poolsById = new Map(input.pools.map((pool) => [pool.poolId.toLowerCase(), pool]))
   const byPool = new Map<string, LiveForkExplorationTarget>()
@@ -167,9 +194,33 @@ export function selectForkExplorationTargets(input: {
   for (const outcome of candidates) {
     const pool = poolsById.get(outcome.poolId.toLowerCase())
     if (!pool || byPool.has(pool.poolId.toLowerCase())) continue
-    const mask = poolScopedMutationMask(pool.poolId, outcome.candidate.transaction.calldata)
+
+    // The official codec first: it decodes from a published ABI and needs no
+    // runtime evidence to be trusted.
+    const official = poolScopedMutationMask(pool.poolId, outcome.candidate.transaction.calldata)
+    if (official) {
+      byPool.set(pool.poolId.toLowerCase(), { pool, candidate: outcome.candidate, mask: official })
+      continue
+    }
+
+    // Otherwise a recognized custom template, which must have passed runtime
+    // recognition and trace attestation before it can be mutated at all.
+    const recognized = input.routerContexts?.byTransaction.get(
+      contextKey(pool.poolId, outcome.candidate.transactionHash),
+    )
+    if (!recognized || recognized.family === 'official') continue
+    const mask = deriveCustomRouterMutationMask({
+      calldata: outcome.candidate.transaction.calldata,
+      expectation: {
+        poolKey: recognized.decoded.poolKey,
+        poolId: recognized.decoded.poolId,
+        transactionValue: outcome.candidate.transaction.value,
+      },
+    })
     if (!mask) continue
-    byPool.set(pool.poolId.toLowerCase(), { pool, candidate: outcome.candidate, mask })
+    byPool.set(pool.poolId.toLowerCase(), {
+      pool, candidate: outcome.candidate, mask, recognizedTemplate: recognized,
+    })
   }
   return [...byPool.values()]
 }
@@ -182,7 +233,7 @@ export function selectForkExplorationTargets(input: {
  * re-checked against the mask, so an exchanged seed can never carry a changed
  * router envelope into the next epoch.
  */
-export function exchangeCorpus(mask: UniswapV4MutationMask, epoch: ForkExplorationEpoch): Hex[] {
+export function exchangeCorpus(mask: HistoricalRouterMutationMask, epoch: ForkExplorationEpoch): Hex[] {
   const ordered = [
     ...minimizeExplorationWitnesses(epoch.witnesses, MAX_EXCHANGED_SEEDS).map((witness) => witness.calldata),
     ...epoch.missingCandidates.map((candidate) => candidate.calldata),
@@ -193,7 +244,9 @@ export function exchangeCorpus(mask: UniswapV4MutationMask, epoch: ForkExplorati
   for (const calldata of ordered) {
     const identity = calldata.toLowerCase()
     if (unique.has(identity)) continue
-    const distance = uniswapV4MutationDistance(mask, calldata)
+    // Dispatched by the mask's own codec: an official distance function applied
+    // to a custom payload would rank noise.
+    const distance = mutationDistance(mask, calldata)
     if (!Number.isFinite(distance)) continue
     unique.set(identity, { calldata, distance })
   }
@@ -225,7 +278,13 @@ function evidence(outcome: LiveForkExplorationOutcome): Evidence {
   const witness = outcome.witnesses.find((item) => item.storageDiffs.length > 0) ?? outcome.witnesses[0]
   const firstStorage = witness?.storageDiffs[0]
   const reached = outcome.uniqueOutcomes >= 2
-  const preserved = 'Every executed input kept the canonical router envelope, caller, value, and settlement commands of the historical transaction.'
+  const custom = outcome.recognizedTemplate && outcome.recognizedTemplate.family !== 'official'
+  // Named from the mask itself: this envelope exposes no hook-data field, and
+  // claiming otherwise would describe mutation that never happened.
+  const mutatedFields = outcome.mask?.fields.map((field) => field.field).join(' and ') || 'masked'
+  const preserved = custom
+    ? `Every executed input kept the recognized template's selector, direction, pool key, hook and settlement currency; only the ${mutatedFields} bytes were mutated.`
+    : 'Every executed input kept the canonical router envelope, caller, value, and settlement commands of the historical transaction.'
   return {
     id: `live-fork-exploration:${outcome.poolId.slice(2, 14)}:${outcome.transactionHash?.slice(2, 10) ?? 'context'}`,
     detectorId: 'live-v4-masked-router-exploration',
@@ -237,8 +296,8 @@ function evidence(outcome: LiveForkExplorationOutcome): Evidence {
       ? 'Masked router inputs reach different outcomes at pinned state'
       : 'Bounded masked router exploration produced no additional outcome',
     claim: reached
-      ? `Coverage-guided mutation of only the masked amount and hookData bytes of a receipt-matched router payload reached ${outcome.uniqueOutcomes} distinct outcomes across ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges at the parent state of transaction ${outcome.transactionHash}. ${preserved}`
-      : `Coverage-guided mutation of only the masked amount and hookData bytes of a receipt-matched router payload ran ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges at the parent state of transaction ${outcome.transactionHash} without reaching a second distinct outcome. ${preserved} This is bounded exploration, not an absence proof.`,
+      ? `Coverage-guided mutation of only the masked ${mutatedFields} bytes of a receipt-matched router payload reached ${outcome.uniqueOutcomes} distinct outcomes across ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges at the parent state of transaction ${outcome.transactionHash}. ${preserved}`
+      : `Coverage-guided mutation of only the masked ${mutatedFields} bytes of a receipt-matched router payload ran ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges at the parent state of transaction ${outcome.transactionHash} without reaching a second distinct outcome. ${preserved} This is bounded exploration, not an absence proof.`,
     confidence: 'confirmed',
     storage: firstStorage ? [{ slot: firstStorage.slot, before: firstStorage.before, after: firstStorage.after }] : undefined,
     affectedPools: [outcome.poolId],
@@ -263,6 +322,7 @@ function evidence(outcome: LiveForkExplorationOutcome): Evidence {
       elapsedMs: outcome.elapsedMs,
       witnesses: outcome.witnesses.slice(0, 16),
       sessionMetrics: outcome.metrics,
+      ...(outcome.recognizedTemplate ? customRouterTechnical(outcome.recognizedTemplate) : undefined),
     },
   }
 }
@@ -319,6 +379,7 @@ async function exploreTarget(input: {
     return {
       poolId: pool.poolId,
       hook: pool.hook,
+      recognizedTemplate: target.recognizedTemplate,
       actor: candidate.transaction.caller,
       router: candidate.transaction.to,
       transactionHash: candidate.transactionHash,
@@ -428,6 +489,8 @@ export async function runLiveForkExploration(input: {
   poolManager: Address
   pools: PoolDescriptor[]
   replay: LivePoolReplayCoverage
+  /** Recognized router families, prepared once after replay and shared with scenarios. */
+  routerContexts?: HistoricalRouterContexts
   signal: AbortSignal
   maxWorkers?: number
   maxPools?: number
@@ -441,7 +504,11 @@ export async function runLiveForkExploration(input: {
   const startedAt = performance.now()
   const hookedPools = input.pools.filter((pool) => pool.hook !== ZERO_ADDRESS)
   const maxPools = Math.max(0, input.maxPools ?? DEFAULT_POOL_CEILING)
-  const recognized = selectForkExplorationTargets({ pools: input.pools, replay: input.replay })
+  const recognized = selectForkExplorationTargets({
+    pools: input.pools,
+    replay: input.replay,
+    routerContexts: input.routerContexts,
+  })
   const targets = recognized.slice(0, maxPools)
   const createSession = input.createSession ?? ((options) => new ForkExplorationSession(options))
   const maxExecutions = Math.min(EXECUTION_BUDGET, Math.max(1, input.maxExecutionsPerPool ?? EXECUTION_BUDGET))
@@ -496,7 +563,7 @@ export async function runLiveForkExploration(input: {
     if (explored.has(pool.poolId.toLowerCase())) continue
     outcomes.push(unexploredOutcome(
       pool,
-      'The receipt-matched transaction used a router envelope whose mutable fields are not supported by the canonical codec, so its exact replay can be observed but bounded input mutation is not generated.',
+      'The receipt-matched transaction used a router envelope that is neither a canonical Uniswap envelope nor a recognized custom template, so its exact replay can be observed but bounded input mutation is not generated.',
     ))
   }
 
@@ -509,7 +576,7 @@ export async function runLiveForkExploration(input: {
   const unrecognized = Math.max(0, hookedPools.length - recognized.length)
   const skippedExecutions = outcomes.reduce((sum, outcome) => sum + outcome.skippedExecutions, 0)
   const limitations = [
-    unrecognized ? `${unrecognized} hooked pool${unrecognized === 1 ? ' has' : 's have'} no receipt-matched supported router envelope with independently attributable mutable fields, so bounded input exploration did not run for ${unrecognized === 1 ? 'it' : 'them'}.` : undefined,
+    unrecognized ? `${unrecognized} hooked pool${unrecognized === 1 ? ' has' : 's have'} no receipt-matched recognized router envelope with independently attributable mutable fields, so bounded input exploration did not run for ${unrecognized === 1 ? 'it' : 'them'}.` : undefined,
     capped.length ? `${capped.length} recognized fork target${capped.length === 1 ? ' was' : 's were'} not explored because the fuzz phase is bounded to ${maxPools} pool${maxPools === 1 ? '' : 's'} per scan.` : undefined,
     failed.length ? `${failed.length} hydrated fork target${failed.length === 1 ? ' did' : 's did'} not complete its bounded rounds.` : undefined,
     completedOutcomes.some((outcome) => outcome.mask?.truncated)

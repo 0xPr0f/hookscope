@@ -99,13 +99,19 @@ describe('generated scenario matrix', () => {
     expect(scenario.commits).toBe(true)
   })
 
-  it('exercises hook data shapes and an alternate caller', () => {
+  it('exercises hook data shapes and an alternate sender', () => {
     const { scenarios } = buildProtocolScenarioMatrix({ key, currentTick: 0, actor: ACTOR })
     expect(scenarios.find((s) => s.id === 'swap:hook-data:empty')!.steps[0]!.hookData).toBe('0x')
     expect(scenarios.find((s) => s.id === 'swap:hook-data:marker')!.steps[0]!.hookData).toBe('0x686f6f6b73636f7065')
     expect(scenarios.find((s) => s.id === 'swap:hook-data:abi-actor')!.steps[0]!.hookData)
       .toContain(ACTOR.slice(2).toLowerCase())
-    expect(scenarios.find((s) => s.id === 'swap:alternate-caller')!.caller).toBe('alternateActor')
+    // The alternate-sender scenario must change the contract that calls the
+    // PoolManager, not merely the transaction caller: a hook's `sender` is
+    // whoever called the PoolManager, which is always a harness instance.
+    const alternate = scenarios.find((s) => s.id === 'swap:alternate-sender')!
+    expect(alternate.caller).toBe('alternateActor')
+    expect(alternate.via).toBe('alternateRouter')
+    expect(scenarios.filter((s) => s.via === 'router').length).toBe(scenarios.length - 1)
   })
 
   it('generates donations for each currency shape', () => {

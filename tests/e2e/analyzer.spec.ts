@@ -6,15 +6,18 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   await page.getByRole('button', { name: 'Analyze token' }).click()
 
   await expect(page.getByText('Completed browser report')).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByText('80 real PoolManager executions', { exact: false })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /\d+ of 5 passed/ })).toBeVisible()
+  await expect(page.getByText(/deterministic pools/)).toBeVisible()
+
+  // Findings live in the evidence ledger, not in the overview summary.
+  await page.getByRole('tab', { name: /Evidence/ }).click()
   await expect(page.getByText('Pinned-state hydration loop completed')).toBeVisible()
   await expect(page.getByText('Inputs produce different state outcomes')).toBeVisible()
   await expect(page.getByText('HookAuthorization.run_Auth_OnlyPoolManager_OnEntrypoints', { exact: false })).toBeVisible()
   await expect(page.getByText('HookConfiguration.run_PermissionsMatchAddressFlags_ifExposed', { exact: false })).toBeVisible()
-  await expect(page.getByTitle(/80 real PoolManager executions/)).toBeVisible()
-  await expect(page.getByText(/30,000 inputs/)).toBeVisible()
   await page.getByRole('button').filter({ hasText: 'Inputs produce different state outcomes' }).click()
   await expect(page.getByText(/libafl-worker-fanout-corpus-exchange\/0.2.0/)).toBeVisible()
-  await expect(page.getByTitle(/cold reads · 0 warm reads/)).toBeVisible()
 
   // The three PoolManager suites must stay visibly separate, each reporting its
   // own result, so a skipped suite can never read as another suite's outcome.

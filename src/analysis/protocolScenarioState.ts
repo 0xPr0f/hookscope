@@ -55,7 +55,13 @@ export const DEFAULT_FUNDING: ScenarioActorFunding = {
 export type ScenarioStateInput = {
   poolManager: Address
   poolManagerAccount: { balance: Hex; nonce: number; code: Hex }
-  router: Address
+  /**
+   * Harness instances to inject. More than one identical instance at different
+   * addresses is what lets a scenario vary the address the PoolManager — and so
+   * the hook — sees as `sender`; changing the transaction caller alone cannot,
+   * because the harness is always the contract that calls the PoolManager.
+   */
+  routers: readonly Address[]
   actors: readonly Address[]
   currencies: readonly [Address, Address]
   funding?: ScenarioActorFunding
@@ -85,9 +91,13 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
   const funding = input.funding ?? DEFAULT_FUNDING
   const patched = patchScenarioRouter(input.poolManager)
 
+  if (!input.routers.length) throw new Error('A scenario overlay needs at least one harness instance.')
+
   const claims: Record<string, Hex> = {}
-  for (const currency of input.currencies) {
-    claims[claimBalanceSlot(input.router, currency)] = toHex(funding.claimsPerCurrency, { size: 32 })
+  for (const router of input.routers) {
+    for (const currency of input.currencies) {
+      claims[claimBalanceSlot(router, currency)] = toHex(funding.claimsPerCurrency, { size: 32 })
+    }
   }
 
   const poolManagerAccount: ForkSnapshotAccount = {
@@ -102,15 +112,15 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
     storageComplete: false,
   }
 
-  const routerAccount: ForkSnapshotAccount = {
-    address: input.router,
+  const routerAccounts: ForkSnapshotAccount[] = input.routers.map((address) => ({
+    address,
     exists: true,
     balance: toHex(funding.nativeWei, { size: 32 }),
     nonce: 1,
     code: patched.runtimeBytecode,
     storage: {},
     storageComplete: true,
-  }
+  }))
 
   const actorAccounts: ForkSnapshotAccount[] = input.actors.map((address) => ({
     address,
@@ -123,11 +133,11 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
   }))
 
   const declaredOverrides: ScenarioStateOverlay['declaredOverrides'] = [
-    {
-      address: input.router,
-      kind: 'harness-code',
+    ...input.routers.map((address) => ({
+      address,
+      kind: 'harness-code' as const,
       detail: `Injected scenario harness runtime ${patched.runtimeHash} bound to PoolManager ${patched.poolManager}.`,
-    },
+    })),
     ...input.actors.map((address) => ({
       address,
       kind: 'native-balance' as const,
@@ -136,14 +146,14 @@ export function buildScenarioStateOverlay(input: ScenarioStateInput): ScenarioSt
     {
       address: input.poolManager,
       kind: 'erc6909-claims',
-      detail: `Harness granted ${funding.claimsPerCurrency} ERC-6909 claims for each pool currency at balanceOf slot ${manifest.poolManagerStorage.slot}. No other PoolManager slot is overridden.`,
+      detail: `Each harness instance granted ${funding.claimsPerCurrency} ERC-6909 claims for each pool currency at balanceOf slot ${manifest.poolManagerStorage.slot}. No other PoolManager slot is overridden.`,
     },
   ]
 
   return {
-    snapshot: { accounts: [poolManagerAccount, routerAccount, ...actorAccounts], blockHashes: [] },
+    snapshot: { accounts: [poolManagerAccount, ...routerAccounts, ...actorAccounts], blockHashes: [] },
     patched,
     declaredOverrides,
-    overlaidAccounts: [input.poolManager, input.router, ...input.actors],
+    overlaidAccounts: [input.poolManager, ...input.routers, ...input.actors],
   }
 }

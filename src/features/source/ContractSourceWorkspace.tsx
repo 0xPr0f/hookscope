@@ -58,6 +58,7 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
     ? selectPrimarySourcePath(cachedSource, node.sourceMetadata?.fullyQualifiedName)
     : undefined)
   const [sideView, setSideView] = useState<'explorer' | 'search'>('explorer')
+  const [mobilePane, setMobilePane] = useState<'files' | 'code'>('code')
   const [query, setQuery] = useState('')
   const [copied, setCopied] = useState(false)
   const editorRef = useRef<ReactCodeMirrorRef>(null)
@@ -114,12 +115,26 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
     view.focus()
   }
 
+  const selectFile = (path: string) => {
+    setSelectedPath(path)
+    setMobilePane('code')
+  }
+
   if (loadState.status === 'loading') return <div className="source-loading source-ide-loading" role="status"><span /> Loading and matching the verified source bundle…</div>
   if (loadState.status === 'error') return <div className="source-load-error source-ide-error" role="alert"><b>Source bundle unavailable</b><span>{loadState.message}</span></div>
   if (!selectedPath || selectedSource === undefined) return <div className="source-ide-empty"><strong>No source file selected</strong></div>
 
   return (
-    <div className="source-ide">
+    <>
+      <div className="source-mobile-switch" role="tablist" aria-label="Mobile source workspace">
+        <button type="button" role="tab" aria-selected={mobilePane === 'files'} onClick={() => setMobilePane('files')}>
+          <FileCode2 size={14} /> Files <span>{sourcePaths.length}</span>
+        </button>
+        <button type="button" role="tab" aria-selected={mobilePane === 'code'} onClick={() => setMobilePane('code')}>
+          <Code2 size={14} /> Code
+        </button>
+      </div>
+      <div className={`source-ide source-mobile-${mobilePane}`}>
       <aside className="source-ide-sidebar">
         <div className="source-side-tabs" role="tablist" aria-label="Source navigation">
           <button type="button" role="tab" aria-selected={sideView === 'explorer'} onClick={() => setSideView('explorer')}>Explorer</button>
@@ -134,7 +149,7 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
         <div className="source-tree-heading"><span>Files</span><small>{visiblePaths.length}</small></div>
         <div className="source-file-tree">
           {visiblePaths.map((path) => (
-            <button type="button" className={path === selectedPath ? 'selected' : ''} onClick={() => setSelectedPath(path)} title={path} key={path}>
+            <button type="button" className={path === selectedPath ? 'selected' : ''} onClick={() => selectFile(path)} title={path} key={path}>
               <Code2 size={13} /><span>{fileLabel(path)}</span><small>{path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''}</small>
             </button>
           ))}
@@ -150,7 +165,7 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
           {!outline.length && <p>No declarations found.</p>}
         </div>
       </aside>
-      <section className="source-editor-pane">
+      <section className="source-editor-pane" aria-label={`Source code for ${fileLabel(selectedPath)}`}>
         <div className="source-open-tab"><Code2 size={13} /><span>{fileLabel(selectedPath)}</span></div>
         <div className="source-editor-toolbar">
           <div className="source-breadcrumbs">{selectedPath.split('/').map((part, index) => <span key={`${part}:${index}`}>{part}</span>)}</div>
@@ -162,7 +177,7 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
           ref={editorRef}
           className="verified-source-editor"
           value={selectedSource}
-          height="560px"
+          height="100%"
           theme={theme}
           editable={false}
           extensions={[solidity]}
@@ -176,7 +191,8 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
           }}
         />
       </section>
-    </div>
+      </div>
+    </>
   )
 }
 

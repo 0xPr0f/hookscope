@@ -12,10 +12,29 @@ import { buildScenarioStateOverlay, type ScenarioStateOverlay } from './protocol
  * is consulted, which is what lets generated scenarios run when replay cannot.
  */
 
-/** Deterministic addresses, documented so a report can name what was injected. */
+/**
+ * Preferred deterministic addresses, documented so a report can name what was
+ * injected. Each is checked for emptiness at the pinned block before use, and a
+ * deterministic alternative is derived when one is already occupied.
+ */
 export const SCENARIO_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce4' as Address
+export const SCENARIO_ALTERNATE_ROUTER_ADDRESS = '0x0000000000000000000000000000000000005ce5' as Address
 export const SCENARIO_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a1' as Address
 export const SCENARIO_ALTERNATE_ACTOR_ADDRESS = '0x00000000000000000000000000000000000ac7a2' as Address
+
+/** How many deterministic alternatives to try before giving up on a slot. */
+const MAX_ADDRESS_PROBES = 64
+
+/**
+ * Derives the nth deterministic alternative for a preferred address.
+ *
+ * Stepping the low bytes keeps the alternative recognizable in a trace and keeps
+ * the choice reproducible: the same chain and block yields the same address.
+ */
+export function deriveAlternateAddress(preferred: Address, attempt: number): Address {
+  const shifted = (BigInt(preferred) + BigInt(attempt) * 0x1_0000n) & ((1n << 160n) - 1n)
+  return getAddress(`0x${shifted.toString(16).padStart(40, '0')}`)
+}
 
 const UINT160_MASK = (1n << 160n) - 1n
 const UINT24_MASK = (1n << 24n) - 1n
@@ -54,8 +73,12 @@ export type ProtocolScenarioContext = {
   poolManager: Address
   pool: PoolDescriptor
   router: Address
+  /** A second identical harness instance, so a scenario can vary the `sender` a hook sees. */
+  alternateRouter: Address
   actor: Address
   alternateActor: Address
+  /** True when a preferred synthetic address was occupied and an alternative was derived. */
+  relocatedAddresses: { preferred: Address; used: Address }[]
   overlay: ScenarioStateOverlay
   /** Absent when slot0 could not be read; liquidity scenarios then report unavailable. */
   slot0?: PoolSlot0
@@ -115,6 +138,36 @@ export async function buildProtocolScenarioContext(input: {
   ])
   if (!code || code === '0x') throw new Error('No PoolManager code at the pinned block.')
 
+  // Injecting a harness over an address that already holds code or a balance
+  // would overwrite real chain state inside the fork, and any observation made
+  // afterwards would be about a pool this chain does not have.
+  const relocatedAddresses: { preferred: Address; used: Address }[] = []
+  const claimed = new Set<string>([poolManager.toLowerCase()])
+  const claimAddress = async (preferred: Address): Promise<Address> => {
+    for (let attempt = 0; attempt < MAX_ADDRESS_PROBES; attempt++) {
+      const candidate = attempt === 0 ? getAddress(preferred) : deriveAlternateAddress(preferred, attempt)
+      if (claimed.has(candidate.toLowerCase())) continue
+      const [candidateCode, candidateBalance, candidateNonce] = await Promise.all([
+        input.client.getCode({ address: candidate, blockNumber: input.stateBlockNumber }),
+        input.client.getBalance({ address: candidate, blockNumber: input.stateBlockNumber }),
+        input.client.getTransactionCount({ address: candidate, blockNumber: input.stateBlockNumber }),
+      ])
+      const empty = (!candidateCode || candidateCode === '0x') && candidateBalance === 0n && candidateNonce === 0
+      if (!empty) continue
+      claimed.add(candidate.toLowerCase())
+      if (attempt > 0) relocatedAddresses.push({ preferred: getAddress(preferred), used: candidate })
+      return candidate
+    }
+    throw new Error(`No empty address was available for the synthetic account near ${preferred}.`)
+  }
+
+  const [router, alternateRouter, actor, alternateActor] = [
+    await claimAddress(SCENARIO_ROUTER_ADDRESS),
+    await claimAddress(SCENARIO_ALTERNATE_ROUTER_ADDRESS),
+    await claimAddress(SCENARIO_ACTOR_ADDRESS),
+    await claimAddress(SCENARIO_ALTERNATE_ACTOR_ADDRESS),
+  ]
+
   const slot0 = await readSlot0({
     client: input.client,
     poolManager,
@@ -125,8 +178,8 @@ export async function buildProtocolScenarioContext(input: {
   const overlay = buildScenarioStateOverlay({
     poolManager,
     poolManagerAccount: { balance: `0x${balance.toString(16)}`, nonce, code },
-    router: SCENARIO_ROUTER_ADDRESS,
-    actors: [SCENARIO_ACTOR_ADDRESS, SCENARIO_ALTERNATE_ACTOR_ADDRESS],
+    routers: [router, alternateRouter],
+    actors: [actor, alternateActor],
     currencies: [input.pool.currency0, input.pool.currency1],
   })
 
@@ -146,9 +199,11 @@ export async function buildProtocolScenarioContext(input: {
     },
     poolManager,
     pool: input.pool,
-    router: SCENARIO_ROUTER_ADDRESS,
-    actor: SCENARIO_ACTOR_ADDRESS,
-    alternateActor: SCENARIO_ALTERNATE_ACTOR_ADDRESS,
+    router,
+    alternateRouter,
+    actor,
+    alternateActor,
+    relocatedAddresses,
     overlay,
     slot0,
   }

@@ -1,6 +1,6 @@
 import type { Address } from 'viem'
 import type { SubgraphSchema } from './subgraphs'
-import { GRAPH_GATEWAY_ORIGIN, UNISWAP_V4_SUBGRAPHS, subgraphProxyPath } from './subgraphs'
+import { UNISWAP_V4_SUBGRAPHS, subgraphProxyPath } from './subgraphs'
 
 export type EvmVariant = 'ethereum' | 'op-stack' | 'arbitrum' | 'zksync' | 'other'
 
@@ -19,8 +19,6 @@ export type ChainConfig = {
    * them through the same gateway.
    */
   subgraphId?: string
-  /** Sent with subgraph requests; carries the bearer token on the direct-gateway path. */
-  subgraphHeaders?: Record<string, string>
   subgraphSchema?: SubgraphSchema
   poolManager?: Address
   deploymentBlock?: bigint
@@ -46,27 +44,16 @@ const envSource = (name: string, id: number) => import.meta.env[`${name}_${id}`]
  * production. An explicit `VITE_V4_SUBGRAPH_<chainId>` still wins for a private
  * or self-hosted indexer that needs no credential.
  *
- * `VITE_GRAPH_API_KEY` remains a last-resort fallback for a static deployment
- * with no server at all. It is not the default and should stay unset: a key
- * compiled into the bundle is readable by anyone who loads the page, and domain
- * restriction only raises the effort needed to reuse it. When it is used, the
- * key travels as a bearer header rather than in the URL, keeping it out of
- * referrer headers, proxy logs, and browser history.
+ * There is deliberately no browser-key fallback. Graph credentials belong in
+ * `SUBGRAPH_API_KEY` on the same server that exposes the narrow proxy route.
  */
 export function resolveSubgraphSource(input: {
   chainId: number
   subgraphId?: string
   explicitUrl?: string
-  browserApiKey?: string
-}): { url?: string; headers?: Record<string, string> } {
+}): { url?: string } {
   if (input.explicitUrl) return { url: input.explicitUrl }
   if (!input.subgraphId) return {}
-  if (input.browserApiKey) {
-    return {
-      url: `${GRAPH_GATEWAY_ORIGIN}/api/subgraphs/id/${input.subgraphId}`,
-      headers: { authorization: `Bearer ${input.browserApiKey}` },
-    }
-  }
   return { url: subgraphProxyPath(input.chainId) }
 }
 
@@ -79,7 +66,6 @@ const config = (
     chainId: input.id,
     subgraphId,
     explicitUrl: envSource('VITE_V4_SUBGRAPH', input.id),
-    browserApiKey: import.meta.env.VITE_GRAPH_API_KEY as string | undefined,
   })
   return {
     ...input,
@@ -87,7 +73,6 @@ const config = (
     subgraphSchema: published?.schema,
     rpcUrls: envRpc(input.id, input.publicRpcs),
     subgraphUrl: source.url ?? input.subgraphUrl,
-    subgraphHeaders: source.headers,
   }
 }
 

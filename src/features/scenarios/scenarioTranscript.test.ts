@@ -56,7 +56,7 @@ describe('scenario console transcript', () => {
     expect(suite(suites, 'live-context').reason).toContain('not PoolManager executions')
   })
 
-  it('maps official-router execution observations into the live suite', () => {
+  it('maps recognized-router execution observations into the live suite', () => {
     const suites = buildScenarioConsoleSuites(report([finding({
       detectorId: 'live-v4-router-variant', title: 'smaller amount: completed',
       technical: { mutation: 'smaller-amount', gasUsed: '42000' },

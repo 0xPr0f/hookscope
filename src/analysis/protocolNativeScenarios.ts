@@ -51,8 +51,17 @@ export type ProtocolScenario = {
   id: string
   operation: 'swap' | 'liquidity' | 'donate' | 'sequence'
   description: string
-  /** The account the harness is called from; alternate callers exercise caller gates. */
+  /** The account the harness is called from. */
   caller: 'actor' | 'alternateActor'
+  /**
+   * Which injected harness instance to call.
+   *
+   * A hook's `sender` argument is whoever called the PoolManager, which is
+   * always the harness — never the transaction caller. Varying the harness
+   * instance is therefore the only way a generated scenario can present a
+   * different `sender` to the hook.
+   */
+  via: 'router' | 'alternateRouter'
   /** Sequences commit each execution so the next one observes the previous. */
   commits: boolean
   steps: ScenarioStep[]
@@ -152,8 +161,8 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
   const unavailable: ScenarioUnavailable[] = []
 
   const push = (
-    scenario: Omit<ProtocolScenario, 'calldata'>,
-  ) => scenarios.push({ ...scenario, calldata: encodeScenario(scenario.steps) })
+    scenario: Omit<ProtocolScenario, 'calldata' | 'via'> & { via?: ProtocolScenario['via'] },
+  ) => scenarios.push({ via: 'router', ...scenario, calldata: encodeScenario(scenario.steps) })
 
   // Swaps: both directions, exact input and exact output, bounded amounts.
   for (const { label, amount } of SWAP_AMOUNTS) {
@@ -190,12 +199,15 @@ export function buildProtocolScenarioMatrix(input: ScenarioMatrixInput): Protoco
     })
   }
 
-  // Alternate caller: the same swap from a different account exposes caller gates.
+  // Alternate sender: the same swap driven by a second, byte-identical harness
+  // instance at a different address, sent by a different actor. This is what a
+  // hook that gates on its caller actually sees change.
   push({
-    id: 'swap:alternate-caller',
+    id: 'swap:alternate-sender',
     operation: 'swap',
-    description: 'exact-input 0-for-1 swap sent by an alternate synthetic actor',
+    description: 'exact-input 0-for-1 swap driven by a second identical harness instance at a different address, sent by an alternate synthetic actor',
     caller: 'alternateActor',
+    via: 'alternateRouter',
     commits: false,
     steps: [swapStep(key, { zeroForOne: true, amountSpecified: -1_000n })],
   })

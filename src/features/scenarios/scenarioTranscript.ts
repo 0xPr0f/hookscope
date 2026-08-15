@@ -144,7 +144,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
   const fixtureSuiteRan = report.findings.some((finding) => finding.detectorId.startsWith('hacken-port-'))
   // Direct hook calls are intentionally excluded. They do not reproduce the
   // PoolManager call stack or its transient unlock context, so a revert there
-  // is not a PoolManager scenario result. Only official-router executions that
+  // is not a PoolManager scenario result. Only recognized-router executions that
   // reached the real PoolManager belong in this Foundry-style transcript.
   const findings = report.findings.filter((finding) => finding.detectorId === 'live-v4-router-variant')
   const lines = findings.map((finding): ScenarioConsoleLine => {

@@ -8,24 +8,16 @@ describe('chain registry subgraph configuration', () => {
     })
   })
 
-  it('sends a browser key as a bearer token instead of embedding it in the URL', () => {
-    const source = resolveSubgraphSource({ chainId: 1, subgraphId: 'SUBGRAPH_ID', browserApiKey: 'KEY' })
-    expect(source.url).toBe('https://gateway.thegraph.com/api/subgraphs/id/SUBGRAPH_ID')
-    expect(source.url).not.toContain('KEY')
-    expect(source.headers).toEqual({ authorization: 'Bearer KEY' })
-  })
-
-  it('prefers an explicit private indexer over both', () => {
+  it('prefers an explicit browser-safe indexer over the server proxy', () => {
     expect(resolveSubgraphSource({
       chainId: 1,
       subgraphId: 'SUBGRAPH_ID',
       explicitUrl: 'https://private.example/graphql',
-      browserApiKey: 'KEY',
     })).toEqual({ url: 'https://private.example/graphql' })
   })
 
   it('resolves nothing for a chain with no published subgraph', () => {
-    expect(resolveSubgraphSource({ chainId: 42161, browserApiKey: 'KEY' })).toEqual({})
+    expect(resolveSubgraphSource({ chainId: 42161 })).toEqual({})
   })
 
   it('leaves chains without a verified subgraph on the log-scan fallback', () => {

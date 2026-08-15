@@ -15,15 +15,15 @@ The analyzer works without a database. `DATABASE_URL` belongs only to the option
 
 Public pool discovery is index-first. Published Uniswap v4 subgraph IDs are not
 secrets, so they live in [`src/config/chains.ts`](./src/config/chains.ts); one
-Graph Network key serves every chain through the same gateway:
+server-side Graph Network key serves every chain through the same-origin proxy:
 
 ```bash
-VITE_GRAPH_API_KEY='your-domain-restricted-graph-key'
+SUBGRAPH_API_KEY='your-graph-key'
 ```
 
-The key is compiled into the browser bundle, so restrict it to your domains in
-The Graph's dashboard. Set `VITE_V4_SUBGRAPH_<chainId>` instead to point a chain
-at a private or self-hosted indexer.
+The key is read only by `/api/subgraph/<chainId>` and is never compiled into the
+browser bundle. Set `VITE_V4_SUBGRAPH_<chainId>` only to point a chain at a
+credential-free private or self-hosted indexer.
 
 Discovery treats index results as candidates only: Hookscope recomputes every
 PoolId, validates initialized PoolManager state at the pinned block, and scans
@@ -56,6 +56,6 @@ The optional read-only live canary is explicit because it depends on configured 
 LIVE_CANARY=1 pnpm exec playwright test tests/e2e/live-canary.spec.ts --project=chromium
 ```
 
-It never persists a failed or timed-out run. Verified index-first discovery is implemented; the Ethereum canary remains gated until `VITE_GRAPH_API_KEY` or `VITE_V4_SUBGRAPH_1` is configured and canaried in the deployment.
+It never persists a failed or timed-out run. Verified index-first discovery is implemented; the Ethereum canary remains gated until `SUBGRAPH_API_KEY` or a credential-free `VITE_V4_SUBGRAPH_1` is configured and canaried in the deployment.
 
 The literal address `0xD0a606aDf58b69a28D479aAA510CE6FE96E0a1eb2` is intentionally covered by validation tests and must fail before RPC access.

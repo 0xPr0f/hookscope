@@ -6,6 +6,7 @@ import { decodeCurrencyDeltas, deltasFullySettled } from './currencyDeltas'
 import { scenarioRouterIdentity } from './protocolScenarioArtifact'
 import { buildProtocolScenarioContext, type ProtocolScenarioContext } from './protocolScenarioContext'
 import { buildProtocolScenarioMatrix, type ProtocolScenario } from './protocolNativeScenarios'
+import { reachedHook, validateScenarioExecution } from './protocolScenarioValidation'
 
 /**
  * Runs generated PoolManager scenarios for the discovered pools.
@@ -16,10 +17,15 @@ import { buildProtocolScenarioMatrix, type ProtocolScenario } from './protocolNa
  * protocol-level observations.
  */
 
-export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.1.0'
+// 0.3.0: generated transactions now pay the pinned execution block's base fee.
+// Earlier reports could reject every generated transaction during revm's block
+// validation before the injected harness ran.
+export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.3.0'
 
 /** EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks. */
 const SCENARIO_GAS_LIMIT = 16_000_000n
+/** `poolManager()` on the harness; used to prove the injected patch took effect. */
+const POOL_MANAGER_GETTER = '0xdc4c90d3' as Hex
 const DEFAULT_POOL_CEILING = 3
 
 export type ProtocolScenarioOutcome = {
@@ -58,16 +64,7 @@ type SessionFactory = (input: {
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 
-/**
- * Distinguishes a finding from a malfunction.
- *
- * A revert reached the PoolManager and is a fact about the pool; a missing state
- * read or worker fault is an analyzer problem and must never be reported as hook
- * behavior.
- */
-function classify(replay: ForkReplayResult): 'completed' | 'reverted' {
-  return replay.proof.success ? 'completed' : 'reverted'
-}
+
 
 function evidenceFor(input: {
   context: ProtocolScenarioContext
@@ -88,7 +85,7 @@ function evidenceFor(input: {
   return {
     id: `protocol-scenario:${context.pool.poolId.slice(2, 14)}:${scenario.id}`,
     detectorId: 'protocol-native-scenario',
-    detectorVersion: '0.1.0',
+    detectorVersion: '0.3.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: context.pool.hook,
@@ -108,6 +105,9 @@ function evidenceFor(input: {
       harness: scenarioRouterIdentity(context.overlay.patched),
       declaredOverrides: context.overlay.declaredOverrides,
       caller: scenario.caller === 'actor' ? context.actor : context.alternateActor,
+      sender: scenario.via === 'router' ? context.router : context.alternateRouter,
+      reachedHook: reachedHook(proof, context.pool.hook),
+      relocatedAddresses: context.relocatedAddresses.length ? context.relocatedAddresses : undefined,
       calldata: scenario.calldata,
       gasUsed: proof.gasUsed,
       observations,
@@ -137,7 +137,7 @@ function suiteManifest(input: {
   return {
     id: 'protocol-scenario-suite',
     detectorId: 'protocol-native-scenario-suite',
-    detectorVersion: '0.1.0',
+    detectorVersion: '0.3.0',
     severity: 'info',
     evidenceClass: 'deterministic-fact',
     subject: input.poolManager,
@@ -239,6 +239,41 @@ export async function runProtocolScenarios(input: {
     })
 
     try {
+      // Preflight: ask the injected harness which PoolManager it is bound to.
+      // Patching only compiler-declared immutable positions is a static
+      // guarantee; this is the runtime one, and it costs a single call.
+      const bound = await session.execute({
+        transaction: {
+          caller: context.actor,
+          to: context.router,
+          calldata: POOL_MANAGER_GETTER,
+          value: 0n,
+          gasLimit: 100_000n,
+          gasPrice: context.executionBlock.baseFee,
+          nonce: 0,
+          chainId: input.chainId,
+          traceLimit: 8,
+        },
+        block: context.executionBlock,
+        signal: input.signal,
+        timeoutMs: input.timeoutMs ?? 20_000,
+        maxHydrationRequests: 64,
+        commit: false,
+      })
+      const reported = bound.proof.success && bound.proof.output.length === 66
+        ? getAddress(`0x${bound.proof.output.slice(26)}`)
+        : undefined
+      if (reported !== context.poolManager) {
+        outcomes.push({
+          poolId: pool.poolId,
+          scenarioId: 'harness-binding',
+          operation: 'swap',
+          status: 'failed',
+          reason: `The injected harness reported PoolManager ${reported ?? 'nothing'}, expected ${context.poolManager}.`,
+        })
+        continue
+      }
+
       let index = 0
       for (const scenario of scenarios) {
         if (input.signal.aborted) throw new DOMException('Generated scenarios cancelled', 'AbortError')
@@ -247,11 +282,11 @@ export async function runProtocolScenarios(input: {
           const replay = await session.execute({
             transaction: {
               caller: scenario.caller === 'actor' ? context.actor : context.alternateActor,
-              to: context.router,
+              to: scenario.via === 'router' ? context.router : context.alternateRouter,
               calldata: scenario.calldata,
               value: 0n,
               gasLimit: SCENARIO_GAS_LIMIT,
-              gasPrice: 0n,
+              gasPrice: context.executionBlock.baseFee,
               nonce: 0,
               chainId: input.chainId,
               traceLimit: 2_048,
@@ -264,10 +299,30 @@ export async function runProtocolScenarios(input: {
             // scenario needs to commit across executions.
             commit: false,
           })
-          const status = classify(replay)
-          if (status === 'completed') completedScenarios++
-          outcomes.push({ poolId: pool.poolId, scenarioId: scenario.id, operation: scenario.operation, status, proof: replay })
-          findings.push(evidenceFor({ context, scenario, replay, reverted: status === 'reverted' }))
+          // Success alone is not evidence: the trace has to have entered the
+          // deployed PoolManager and named the selected pool.
+          const validation = validateScenarioExecution({
+            proof: replay.proof,
+            scenario,
+            poolManager: context.poolManager,
+            hook: context.pool.hook,
+            poolId: context.pool.poolId,
+            router: scenario.via === 'router' ? context.router : context.alternateRouter,
+          })
+          if (validation.status === 'failed') {
+            outcomes.push({
+              poolId: pool.poolId,
+              scenarioId: scenario.id,
+              operation: scenario.operation,
+              status: 'failed',
+              proof: replay,
+              reason: validation.reason,
+            })
+            continue
+          }
+          if (validation.status === 'completed') completedScenarios++
+          outcomes.push({ poolId: pool.poolId, scenarioId: scenario.id, operation: scenario.operation, status: validation.status, proof: replay })
+          findings.push(evidenceFor({ context, scenario, replay, reverted: validation.status === 'reverted' }))
         } catch (error) {
           if (input.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
           outcomes.push({
@@ -291,7 +346,7 @@ export async function runProtocolScenarios(input: {
   const capped = Math.max(0, hookedPools.length - selected.length)
 
   if (capped) limitations.push(`${capped} hooked pool${capped === 1 ? ' was' : 's were'} not covered by generated scenarios because the phase is bounded per scan.`)
-  if (failed) limitations.push(`${failed} generated scenario${failed === 1 ? '' : 's'} could not execute for infrastructure reasons and produced no observation.`)
+  if (failed) limitations.push(`${failed} generated scenario${failed === 1 ? '' : 's'} did not produce an observation: each either could not execute, or executed without reaching the deployed PoolManager for the selected pool.`)
   if (reverted) limitations.push(`${reverted} generated scenario${reverted === 1 ? '' : 's'} reverted; a revert reached by the PoolManager is an observation about the pool, not an analyzer failure.`)
   if (outcomes.some((outcome) => outcome.status === 'unavailable')) {
     limitations.push('Some generated scenarios were unavailable at the pinned block; each records its own reason.')

@@ -14,6 +14,7 @@ import {
   type ProtocolScenarioContext,
 } from './protocolScenarioContext'
 import { buildProtocolScenarioMatrix, type ProtocolScenario } from './protocolNativeScenarios'
+import { validateScenarioExecution } from './protocolScenarioValidation'
 import {
   deriveScenarioMutationMask,
   isScenarioDerivative,
@@ -31,7 +32,10 @@ import {
  * PoolKey, the operation, and every tick bound exactly as generated.
  */
 
-export const PROTOCOL_EXPLORATION_STRATEGY = 'libafl-masked-generated-scenario-rounds/0.1.0'
+// 0.3.0: warm-up and explored transactions now pay the pinned execution
+// block's base fee, so validation reaches the generated harness on London and
+// later blocks instead of failing transaction validation first.
+export const PROTOCOL_EXPLORATION_STRATEGY = 'libafl-masked-generated-scenario-rounds/0.3.0'
 
 /** The revm Wasm bridge rejects a mask wider than its own input ceiling. */
 const MAX_MUTABLE_BYTES = 512
@@ -61,6 +65,10 @@ export type ProtocolExplorationShape = {
   scenarioId: string
   operation: ProtocolScenario['operation']
   mutableBytes: number
+  /** How this shape's canonical seed was shown to reach the selected pool. */
+  seedProvenance: 'warmed-here' | 'validated-by-scenario-suite'
+  /** Whether this shape's own seed reverted after reaching the PoolManager. */
+  seedReverted: boolean
   executions: number
   skippedExecutions: number
   coverageEdges: number
@@ -73,6 +81,16 @@ export type ProtocolExplorationOutcome = {
   hook: Address
   status: 'completed' | 'unavailable' | 'failed'
   reason?: string
+  /**
+   * Whether any explored shape's seed reverted.
+   *
+   * Explicit because it changes what the exploration means: from a reverting
+   * seed, mutation is searching for an input the pool accepts, not for a second
+   * outcome beyond an accepted one. Per-shape detail lives on each shape.
+   */
+  seedReverted?: boolean
+  /** Shapes dropped because their canonical seed never reached the pool. */
+  rejectedSeeds?: { scenarioId: string; reason: string }[]
   shapes: ProtocolExplorationShape[]
   executions: number
   skippedExecutions: number
@@ -145,12 +163,15 @@ function evidenceFor(input: {
   const { context, outcome } = input
   const witness = outcome.witnesses.find((item) => item.storageDiffs.length > 0) ?? outcome.witnesses[0]
   const reached = outcome.uniqueOutcomes >= 2
-  const preserved = 'Every executed input kept the generated PoolKey, operation, tick bounds, and salt; only amount, liquidity, donation, hookData, and direction bytes were mutated.'
+  const preserved = 'Every executed input kept the generated PoolKey, operation, tick bounds, and salt; only amount, liquidity, donation and hookData bytes were mutated.'
+  const seedNote = outcome.seedReverted
+    ? ' The seed for this search was itself rejected by the pool, so the search started from a reverting input.'
+    : ''
 
   return {
     id: `protocol-scenario-exploration:${outcome.poolId.slice(2, 14)}`,
     detectorId: 'protocol-native-scenario-exploration',
-    detectorVersion: '0.1.0',
+    detectorVersion: '0.3.0',
     severity: reached ? 'medium' : 'info',
     evidenceClass: 'fuzz-discovery',
     subject: outcome.hook,
@@ -158,8 +179,8 @@ function evidenceFor(input: {
       ? 'Generated scenario inputs reach different outcomes at pinned state'
       : 'Bounded generated-scenario exploration produced no additional outcome',
     claim: reached
-      ? `Coverage-guided mutation of generated PoolManager calldata reached ${outcome.uniqueOutcomes} distinct outcomes across ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges against the deployed PoolManager and hook at block ${context.stateBlockNumber}. ${preserved} These are generated transactions against pinned state, not onchain transactions.`
-      : `Coverage-guided mutation of generated PoolManager calldata ran ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges against the deployed PoolManager and hook at block ${context.stateBlockNumber} without reaching a second distinct outcome. ${preserved} This is bounded exploration against pinned state, not an absence proof and not an onchain transaction.`,
+      ? `Coverage-guided mutation of generated PoolManager calldata reached ${outcome.uniqueOutcomes} distinct outcomes across ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges against the deployed PoolManager and hook at block ${context.stateBlockNumber}. ${preserved}${seedNote} These are generated transactions against pinned state, not onchain transactions.`
+      : `Coverage-guided mutation of generated PoolManager calldata ran ${outcome.executions.toLocaleString()} executions and ${outcome.coverageEdges} execution edges against the deployed PoolManager and hook at block ${context.stateBlockNumber} without reaching a second distinct outcome. ${preserved}${seedNote} This is bounded exploration against pinned state, not an absence proof and not an onchain transaction.`,
     confidence: 'confirmed',
     storage: witness?.storageDiffs[0]
       ? [{ slot: witness.storageDiffs[0].slot, before: witness.storageDiffs[0].before, after: witness.storageDiffs[0].after }]
@@ -167,6 +188,7 @@ function evidenceFor(input: {
     affectedPools: [outcome.poolId],
     witness: witness ? {
       from: context.actor,
+      // Every exploration seed runs through the primary harness instance.
       to: context.router,
       input: witness.calldata,
       value: '0',
@@ -183,6 +205,7 @@ function evidenceFor(input: {
       strategy: PROTOCOL_EXPLORATION_STRATEGY,
       harness: scenarioRouterIdentity(context.overlay.patched),
       shapes: outcome.shapes,
+      seedReverted: Boolean(outcome.seedReverted),
       skippedExecutions: outcome.skippedExecutions,
       elapsedMs: outcome.elapsedMs,
       witnesses: outcome.witnesses.slice(0, 16),
@@ -203,6 +226,7 @@ async function explorePool(input: {
   timeoutMs: number
   seed: bigint
   maxHydrationRequests?: number
+  validatedScenarioIds?: Set<string>
   onShape?: (detail: string) => void
 }): Promise<ProtocolExplorationOutcome> {
   const { context, seeds, signal } = input
@@ -216,14 +240,16 @@ async function explorePool(input: {
   })
   const shapes: ProtocolExplorationShape[] = []
   const witnesses: RevmExplorationWitness[] = []
+  const rejectedSeeds: { scenarioId: string; reason: string }[] = []
+  let seedReverted = false
 
   const transactionFor = (scenario: ProtocolScenario) => ({
     caller: scenario.caller === 'actor' ? context.actor : context.alternateActor,
-    to: context.router,
+    to: scenario.via === 'router' ? context.router : context.alternateRouter,
     calldata: scenario.calldata,
     value: 0n,
     gasLimit: SCENARIO_GAS_LIMIT,
-    gasPrice: 0n,
+    gasPrice: context.executionBlock.baseFee,
     nonce: 0,
     chainId: context.chainId,
     traceLimit: 2_048,
@@ -236,6 +262,8 @@ async function explorePool(input: {
       hook: context.pool.hook,
       status,
       reason,
+      seedReverted,
+      rejectedSeeds: rejectedSeeds.length ? rejectedSeeds : undefined,
       shapes,
       executions: shapes.reduce((sum, shape) => sum + shape.executions, 0),
       skippedExecutions: shapes.reduce((sum, shape) => sum + shape.skippedExecutions, 0),
@@ -257,18 +285,64 @@ async function explorePool(input: {
       context.pool.currency1,
     ]))
     input.onShape?.('hydrating the pinned pool context')
-    // Warming on the first seed pulls in the state every shape shares, so each
-    // shape spends its budget on execution rather than on repeated hydration.
-    await session.warm({
-      transaction: transactionFor(seeds[0]!.scenario),
-      block: context.executionBlock,
-      signal,
-      timeoutMs: Math.max(MIN_SHAPE_MS, Math.floor(deadline - performance.now())),
-      maxHydrationRequests: input.maxHydrationRequests ?? 2_048,
-    })
 
-    const budgets = splitExplorationBudget(seeds.map((target) => target.scenario.id), input.maxExecutions)
-    for (const [index, target] of seeds.entries()) {
+    // Seed policy, stated rather than implied, and applied to every shape:
+    //
+    // - a seed that never reached the deployed PoolManager is not explorable,
+    //   because every mutation of it would fail the same way for the same
+    //   analyzer-side reason, and no result would be about the pool;
+    // - a seed that reached the PoolManager and reverted IS explorable, and the
+    //   revert is recorded so the evidence can say the search started from a
+    //   rejected input rather than an accepted one.
+    //
+    // Each shape is a different calldata layout that can fail for its own
+    // reason — a liquidity range the pool rejects, a donation the hook refuses —
+    // so proving one shape says nothing about the others. A shape the scenario
+    // suite already validated at this same pinned block skips its warm run;
+    // otherwise it is warmed here. The first warm also performs the hydration
+    // every later shape reuses.
+    const validated = input.validatedScenarioIds
+    const explorable: { target: SeedTarget; provenance: ProtocolExplorationShape['seedProvenance']; reverted: boolean }[] = []
+    let warmedOnce = false
+
+    for (const target of seeds) {
+      if (signal.aborted) throw new DOMException('Generated exploration cancelled', 'AbortError')
+      if (warmedOnce && validated?.has(target.scenario.id)) {
+        explorable.push({ target, provenance: 'validated-by-scenario-suite', reverted: false })
+        continue
+      }
+      const warmed = await session.warm({
+        transaction: transactionFor(target.scenario),
+        block: context.executionBlock,
+        signal,
+        timeoutMs: Math.max(MIN_SHAPE_MS, Math.floor(deadline - performance.now())),
+        maxHydrationRequests: input.maxHydrationRequests ?? 2_048,
+      })
+      warmedOnce = true
+      const seedValidation = validateScenarioExecution({
+        proof: warmed.proof,
+        scenario: target.scenario,
+        poolManager: context.poolManager,
+        hook: context.pool.hook,
+        poolId: context.pool.poolId,
+        router: target.scenario.via === 'router' ? context.router : context.alternateRouter,
+      })
+      if (seedValidation.status === 'failed') {
+        rejectedSeeds.push({ scenarioId: target.scenario.id, reason: seedValidation.reason })
+        continue
+      }
+      explorable.push({ target, provenance: 'warmed-here', reverted: seedValidation.status === 'reverted' })
+    }
+
+    if (!explorable.length) {
+      throw new Error(
+        `No generated seed reached the selected pool: ${rejectedSeeds.map((item) => `${item.scenarioId} (${item.reason})`).join('; ')}`,
+      )
+    }
+    seedReverted = explorable.some((item) => item.reverted)
+
+    const budgets = splitExplorationBudget(explorable.map((item) => item.target.scenario.id), input.maxExecutions)
+    for (const [index, { target, provenance, reverted }] of explorable.entries()) {
       const budget = budgets[index]?.executions ?? 0
       const remainingMs = Math.floor(deadline - performance.now())
       if (budget <= 0 || remainingMs < MIN_SHAPE_MS) break
@@ -291,6 +365,8 @@ async function explorePool(input: {
         scenarioId: target.scenario.id,
         operation: target.scenario.operation,
         mutableBytes: target.mask.byteIndices.length,
+        seedProvenance: provenance,
+        seedReverted: reverted,
         executions: epoch.executions,
         skippedExecutions: epoch.skippedExecutions + (epoch.witnesses.length - kept.length),
         coverageEdges: epoch.coverageEdges,
@@ -332,6 +408,13 @@ export async function runProtocolScenarioExploration(input: {
   timeoutMsPerPool?: number
   maxHydrationRequests?: number
   seed?: bigint
+  /**
+   * Scenario ids the generated scenario suite already proved reach the selected
+   * pool at this same pinned block. Purely an optimization: a seed that is not
+   * listed is warmed and validated here instead, so this phase never depends on
+   * the scenario suite having run.
+   */
+  validatedScenarioIds?: Set<string>
   createSession?: SessionFactory
   onProgress?: (completed: number, total: number, detail: string) => void
 }): Promise<ProtocolExplorationCoverage> {
@@ -420,6 +503,7 @@ export async function runProtocolScenarioExploration(input: {
       maxExecutions,
       timeoutMs,
       maxHydrationRequests: input.maxHydrationRequests,
+      validatedScenarioIds: input.validatedScenarioIds,
       seed: (input.seed ?? 0x484f_4f4b_5343_4f50n) + BigInt(index * 0x100),
       onShape: (detail) => input.onProgress?.(completed, selected.length, `${pool.poolId.slice(0, 10)} · ${detail}`),
     })
@@ -441,6 +525,12 @@ export async function runProtocolScenarioExploration(input: {
       : undefined,
     skippedExecutions
       ? `${skippedExecutions} generated input${skippedExecutions === 1 ? ' was' : 's were'} skipped for unavailable fork state or for falling outside its mask.`
+      : undefined,
+    outcomes.some((outcome) => outcome.rejectedSeeds?.length)
+      ? 'Some generated shapes were not explored because their canonical seed never reached the selected pool; each records its own reason.'
+      : undefined,
+    completedOutcomes.some((outcome) => outcome.seedReverted)
+      ? 'At least one exploration searched outward from a seed the pool rejected, so its results describe which inputs remain rejected rather than how an accepted input varies.'
       : undefined,
     completedOutcomes.length
       ? 'Bounded exploration cannot prove the absence of unobserved mechanics; tick bounds and PoolKey fields were never mutated.'

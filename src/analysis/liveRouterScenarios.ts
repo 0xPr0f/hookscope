@@ -11,6 +11,16 @@ import {
   type V4PoolKey,
 } from '../adapters/uniswapV4RouterCodec'
 import { computePoolId } from '../adapters/uniswapV4Pool'
+import {
+  decodeCustomV4UnlockCalldata,
+  encodeCustomV4UnlockCalldata,
+} from '../adapters/customV4UnlockRouterCodec'
+import {
+  contextKey,
+  customRouterTechnical,
+  type HistoricalRouterContext,
+  type HistoricalRouterContexts,
+} from '../data/historicalRouterContext'
 import { collectSignedPayloads, signedPayloadLimitation, type SignedPayload } from '../adapters/uniswapV4SignedPayloads'
 import { forwardedPositionManagerCalls, observedPositionManagerTargets } from './positionManagerResolution'
 import { observationSummary, summarizeExecutionObservations } from './executionObservations'
@@ -33,7 +43,7 @@ export type LiveRouterScenario = {
   id: string
   description: string
   operationKind: V4ControlledOperation['kind'] | 'historical-envelope'
-  mutation: 'hook-data-empty' | 'hook-data-marker' | 'smaller-amount' | 'flipped-direction' | 'widened-tick-range' | 'repeated-sequence' | 'historical-replay'
+  mutation: 'hook-data-empty' | 'hook-data-marker' | 'smaller-amount' | 'flipped-direction' | 'widened-tick-range' | 'repeated-sequence' | 'historical-replay' | 'reduced-amount'
   calldata: Hex
 }
 
@@ -58,6 +68,8 @@ export type LiveRouterScenarioOutcome = {
   currencies?: [Address, Address]
   /** Pool key fee, so an observed fee can be compared with what the key advertises. */
   poolFee?: number
+  /** Present when this pool's router was recognized as a pinned custom template. */
+  recognizedTemplate?: HistoricalRouterContext
   results: LiveRouterScenarioResult[]
   metrics?: ForkSessionMetrics
 }
@@ -379,7 +391,9 @@ function evidence(
       ? `The exact historical custom-router payload from transaction ${outcome.transactionHash} reproduced its receipt and the execution trace reached both PoolManager and the selected hook; no calldata field was changed.`
       : repeatedEnvelope
       ? `The exact historical router payload from transaction ${outcome.transactionHash} was executed twice in one pinned session without changing its calldata; the second execution ${proof.success ? 'completed' : 'reverted'}.`
-      : `The recognized official v4 router payload was replayed at the parent state of transaction ${outcome.transactionHash} with only the ${result.scenario.mutation.replaceAll('-', ' ')} field changed; it ${proof.success ? 'completed' : 'reverted'}.`,
+      : outcome.recognizedTemplate && outcome.recognizedTemplate.family !== 'official'
+      ? `An attested custom router template was replayed at the parent state of transaction ${outcome.transactionHash} with only the input amount changed; it ${proof.success ? 'completed' : 'reverted'}. The template was derived from pinned runtime bytecode and reproduced execution, not from verified source or a published ABI.`
+      : `The recognized historical v4 router payload was replayed at the parent state of transaction ${outcome.transactionHash} with only the ${result.scenario.mutation.replaceAll('-', ' ')} field changed; it ${proof.success ? 'completed' : 'reverted'}.`,
     confidence: 'confirmed',
     callPath: proof.calls.map((call) => getAddress(call.target)).slice(0, 64),
     storage: firstStorage ? [{ slot: firstStorage.slot, before: firstStorage.before, after: firstStorage.after }] : undefined,
@@ -412,6 +426,7 @@ function evidence(
       transientWrites: observations.transientWrites.slice(0, 32),
       externalSelectors: observations.externalSelectors,
       sessionMetrics: outcome.metrics,
+      ...(outcome.recognizedTemplate ? customRouterTechnical(outcome.recognizedTemplate) : undefined),
     },
   }
 }
@@ -426,16 +441,74 @@ export function candidatePriority(outcome: PoolReplayOutcome) {
 
 type PositionLookupStats = LiveRouterScenarioCoverage['positionLookups']
 
+/**
+ * Conservative variants for a recognized custom-router payload.
+ *
+ * Only the amount word moves. Everything that decides which pool is reached, who
+ * pays, and in which direction stays byte-identical, and every candidate is
+ * re-decoded against the same pool before it is accepted.
+ *
+ * Deliberately not generated: hook-data variants, because this envelope exposes
+ * no hook-data field; direction flips, because funding, native value and the
+ * settlement currency would all have to change together; exact-output variants,
+ * because the template was observed constructing an exact-input swap; and
+ * recipient changes, because no recipient field is independently identified.
+ */
+export function customRouterScenarios(context: HistoricalRouterContext): LiveRouterScenario[] {
+  if (context.family === 'official') return []
+  const seed = context.decoded
+  const variants: { id: string; label: string; amountIn: bigint }[] = [
+    { id: 'half-amount', label: 'half the historical input amount', amountIn: seed.amountIn / 2n },
+    { id: 'quarter-amount', label: 'one quarter of the historical input amount', amountIn: seed.amountIn / 4n },
+    { id: 'amount-minus-one', label: 'one unit below the historical input amount', amountIn: seed.amountIn - 1n },
+  ]
+
+  const scenarios: LiveRouterScenario[] = []
+  for (const variant of variants) {
+    if (variant.amountIn <= 0n || variant.amountIn >= seed.amountIn) continue
+    let calldata: Hex
+    try {
+      calldata = encodeCustomV4UnlockCalldata(seed, { amountIn: variant.amountIn })
+    } catch {
+      continue
+    }
+    // A generated payload only ships if it still decodes to the same pool.
+    const check = decodeCustomV4UnlockCalldata(calldata, {
+      poolKey: seed.poolKey,
+      poolId: seed.poolId,
+      transactionValue: 0n,
+    })
+    if (!check.ok || check.decoded.poolId.toLowerCase() !== seed.poolId.toLowerCase()) continue
+    if (check.decoded.zeroForOne !== seed.zeroForOne) continue
+    if (check.decoded.settlementCurrency.toLowerCase() !== seed.settlementCurrency.toLowerCase()) continue
+    scenarios.push({
+      id: `custom-router:${variant.id}`,
+      description: `the recognized custom-router payload with ${variant.label}`,
+      operationKind: 'historical-envelope',
+      mutation: 'reduced-amount',
+      calldata,
+    })
+  }
+  return scenarios
+}
+
 async function selectContexts(input: {
   pools: PoolDescriptor[]
   replay: LivePoolReplayCoverage
   client: PublicClient
   poolManager: Address
   signal: AbortSignal
+  routerContexts?: HistoricalRouterContexts
 }) {
   const { pools, replay, client, poolManager, signal } = input
   const poolsById = new Map(pools.map((pool) => [pool.poolId.toLowerCase(), pool]))
-  const selected = new Map<string, { pool: PoolDescriptor; outcome: PoolReplayOutcome; scenarios: LiveRouterScenario[]; canonicalEnvelope: boolean }>()
+  const selected = new Map<string, {
+    pool: PoolDescriptor
+    outcome: PoolReplayOutcome
+    scenarios: LiveRouterScenario[]
+    canonicalEnvelope: boolean
+    recognizedTemplate?: HistoricalRouterContext
+  }>()
   const positionCache = new Map<string, Promise<PositionManagerPosition | undefined>>()
   const positionLookups: PositionLookupStats = { reads: 0, resolved: 0, unavailable: 0, nestedSkipped: 0, capped: 0, observedTargets: 0, ambiguous: 0 }
   const signedPayloads: SignedPayload[] = []
@@ -511,7 +584,17 @@ async function selectContexts(input: {
     const reachedPoolManager = calls.some((call) => sameHex(call.target, poolManager))
       && calls.some((call) => sameHex(call.target, pool.hook))
     if (scenarios.length || reachedPoolManager) {
-      selected.set(pool.poolId.toLowerCase(), { pool, outcome, scenarios, canonicalEnvelope: scenarios.length > 0 })
+    // A recognized custom router earns conservative amount variants. It is not
+    // an official envelope, so it keeps its own flag and its own report wording.
+    const recognized = input.routerContexts?.byTransaction.get(contextKey(pool.poolId, candidate.transactionHash))
+    const custom = recognized ? customRouterScenarios(recognized) : []
+    if (custom.length) {
+      selected.set(pool.poolId.toLowerCase(), {
+        pool, outcome, scenarios: custom, canonicalEnvelope: false, recognizedTemplate: recognized,
+      })
+      continue
+    }
+    selected.set(pool.poolId.toLowerCase(), { pool, outcome, scenarios, canonicalEnvelope: scenarios.length > 0 })
       if (decoded) for (const signed of collectSignedPayloads(decoded)) signedPayloads.push(signed)
     }
   }
@@ -528,11 +611,20 @@ export async function runLiveRouterScenarios(input: {
   maxWorkers?: number
   timeoutMs?: number
   maxHydrationRequests?: number
+  /** Recognized router families, prepared once after replay and shared with exploration. */
+  routerContexts?: HistoricalRouterContexts
   createSession?: SessionFactory
   onProgress?: (completed: number, total: number, detail: string) => void
 }): Promise<LiveRouterScenarioCoverage> {
   const eligiblePools = input.pools.filter((pool) => pool.hook !== '0x0000000000000000000000000000000000000000').length
-  const selection = await selectContexts({ pools: input.pools, replay: input.replay, client: input.client, poolManager: input.poolManager, signal: input.signal })
+  const selection = await selectContexts({
+    pools: input.pools,
+    replay: input.replay,
+    client: input.client,
+    poolManager: input.poolManager,
+    signal: input.signal,
+    routerContexts: input.routerContexts,
+  })
   const { contexts, positionLookups, signedPayloads } = selection
   const createSession = input.createSession ?? ((options) => new ForkExecutionSession(options))
   const outcomes: LiveRouterScenarioOutcome[] = []
@@ -543,7 +635,7 @@ export async function runLiveRouterScenarios(input: {
       const context = contexts[cursor++]
       if (!context) return
       const candidate = context.outcome.candidate!
-      if (!context.canonicalEnvelope && context.outcome.replay) {
+      if (!context.canonicalEnvelope && !context.scenarios.length && context.outcome.replay) {
         outcomes.push({
           poolId: context.pool.poolId,
           hook: context.pool.hook,
@@ -630,6 +722,7 @@ export async function runLiveRouterScenarios(input: {
           status: 'completed',
           currencies: [context.pool.currency0, context.pool.currency1],
           poolFee: context.pool.fee,
+          recognizedTemplate: context.recognizedTemplate,
           results,
           metrics: session.metrics(),
         })

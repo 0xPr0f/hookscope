@@ -13,7 +13,13 @@ import manifest from '../fixtures/generated/protocol-scenario-router.json'
  *   search, which could rewrite an unrelated constant that happens to match;
  * - require each target to be zeroed in the template, so a patch never silently
  *   overwrites meaningful code;
- * - re-derive the template and source hashes and reject on any drift.
+ * - re-derive the template hash from the bytes actually about to be injected and
+ *   reject on any drift, so a tampered manifest cannot smuggle in other code.
+ *
+ * The manifest's sha256 `templateHash` and `sourceHash` identify the build for
+ * humans and for the CI drift gate. They cannot be recomputed here — the source
+ * is not shipped to the browser, and sha256 is only available asynchronously —
+ * so injection enforces `templateKeccak`, which covers the same bytes.
  */
 
 export type ProtocolScenarioManifest = typeof manifest
@@ -24,9 +30,10 @@ export type PatchedScenarioRouter = {
   runtimeHash: Hex
   poolManager: Address
   templateHash: string
+  templateKeccak: Hex
   sourceHash: string
   compiler: string
-  uniswap: { core: string; periphery: string }
+  uniswap: { core: string; periphery: string; coreIntegrity: string; peripheryIntegrity: string }
 }
 
 export class ScenarioArtifactError extends Error {}
@@ -40,6 +47,11 @@ function assertTemplateIntegrity(template: string) {
   }
   if (!manifest.immutablePoolManagerPositions.length) {
     throw new ScenarioArtifactError('Scenario harness manifest declares no immutable position to patch.')
+  }
+  if (keccak256(template as Hex) !== manifest.templateKeccak) {
+    throw new ScenarioArtifactError(
+      'Scenario harness runtime does not hash to its manifest template hash; refusing to inject unverified code.',
+    )
   }
 }
 
@@ -81,6 +93,7 @@ export function patchScenarioRouter(poolManager: Address): PatchedScenarioRouter
     runtimeHash: keccak256(runtimeBytecode),
     poolManager: address,
     templateHash: manifest.templateHash,
+    templateKeccak: manifest.templateKeccak as Hex,
     sourceHash: manifest.sourceHash,
     compiler: manifest.compiler.solc,
     uniswap: manifest.uniswap,
@@ -118,6 +131,8 @@ export function scenarioHarnessIdentity() {
     uniswapPeriphery: manifest.uniswap.periphery,
     poolManagerStorageLayout: manifest.poolManagerStorage.layoutHash,
     poolManagerClaimSlot: manifest.poolManagerStorage.slot,
+    uniswapCoreIntegrity: manifest.uniswap.coreIntegrity,
+    uniswapPeripheryIntegrity: manifest.uniswap.peripheryIntegrity,
   }
 }
 
@@ -127,11 +142,14 @@ export function scenarioRouterIdentity(patched: PatchedScenarioRouter) {
     contract: manifest.contract,
     note: manifest.description,
     templateHash: patched.templateHash,
+    templateKeccak: patched.templateKeccak,
     sourceHash: patched.sourceHash,
     runtimeHash: patched.runtimeHash,
     compiler: patched.compiler,
     uniswapCore: patched.uniswap.core,
     uniswapPeriphery: patched.uniswap.periphery,
+    uniswapCoreIntegrity: patched.uniswap.coreIntegrity,
+    uniswapPeripheryIntegrity: patched.uniswap.peripheryIntegrity,
     poolManager: patched.poolManager,
   }
 }

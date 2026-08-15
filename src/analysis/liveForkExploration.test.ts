@@ -383,7 +383,7 @@ describe('live hydrated-fork exploration', () => {
     expect(coverage.findings).toHaveLength(0)
     expect(coverage.outcomes).toHaveLength(1)
     expect(coverage.outcomes[0]).toMatchObject({ poolId, status: 'unsupported' })
-    expect(coverage.limitations[0]).toContain('no receipt-matched supported router envelope')
+    expect(coverage.limitations[0]).toContain('no receipt-matched recognized router envelope')
   })
 
   it('records a failed target without discarding the whole phase', async () => {

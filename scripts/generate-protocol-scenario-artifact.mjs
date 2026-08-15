@@ -9,12 +9,37 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { keccak_256 } from '@noble/hashes/sha3.js'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const root = new URL('../', import.meta.url)
 const read = (relative) => readFileSync(fileURLToPath(new URL(relative, root)), 'utf8')
 const keccakLike = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`
+/**
+ * keccak256 of the raw runtime, so the browser can re-derive and compare it
+ * synchronously. The sha256 hashes above identify the manifest and its source
+ * for humans and CI; this one is the value injection actually enforces.
+ */
+const runtimeKeccak = (hex) =>
+  `0x${Buffer.from(keccak_256(Buffer.from(hex.replace(/^0x/, ''), 'hex'))).toString('hex')}`
+
+/**
+ * Pins the upstream Uniswap packages by npm tarball integrity.
+ *
+ * The published packages carry no gitHead, so a commit hash cannot be recorded
+ * honestly. The lockfile integrity is what actually determined these bytes.
+ */
+function upstreamIntegrity() {
+  const lock = read('pnpm-lock.yaml')
+  const pin = (name, version) => {
+    const pattern = new RegExp(`'${name}@${version.replace(/\./g, '\\.')}':\\s*\\n\\s*resolution: \\{integrity: (sha512-[^}]+)\\}`)
+    const match = pattern.exec(lock)
+    if (!match) throw new Error(`No lockfile integrity pin for ${name}@${version}.`)
+    return match[1]
+  }
+  return { pin }
+}
 
 const ARTIFACT = 'out/ProtocolScenarioRouter.sol/ProtocolScenarioRouter.json'
 const SOURCE = 'contracts/fixtures/ProtocolScenarioRouter.sol'
@@ -88,6 +113,7 @@ function main() {
     // Hash of the unpatched template. The per-chain hash is derived after
     // patching, so this pins what was patched rather than the result.
     templateHash: keccakLike(runtime),
+    templateKeccak: runtimeKeccak(runtime),
     sourceHash: keccakLike(source),
     immutablePoolManagerPositions: positions,
     compiler: {
@@ -97,7 +123,12 @@ function main() {
       optimizer: artifact.metadata.settings.optimizer,
       bytecodeHash: artifact.metadata.settings.metadata?.bytecodeHash ?? 'unknown',
     },
-    uniswap: { core: core.version, periphery: periphery.version },
+    uniswap: {
+      core: core.version,
+      periphery: periphery.version,
+      coreIntegrity: upstreamIntegrity().pin('@uniswap/v4-core', core.version),
+      peripheryIntegrity: upstreamIntegrity().pin('@uniswap/v4-periphery', periphery.version),
+    },
     poolManagerStorage: poolManagerClaimSlot(),
     selectors: artifact.methodIdentifiers,
     generatedAt: new Date().toISOString().slice(0, 10),

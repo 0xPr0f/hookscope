@@ -14,6 +14,10 @@ import {
 import { runLivePoolReplays, type LivePoolReplayCoverage } from '../../analysis/livePoolReplay'
 import { runLiveRouterScenarios, type LiveRouterScenarioCoverage } from '../../analysis/liveRouterScenarios'
 import { runLiveForkExploration, type LiveForkExplorationCoverage } from '../../analysis/liveForkExploration'
+import {
+  prepareHistoricalRouterContexts,
+  type HistoricalRouterContexts,
+} from '../../data/historicalRouterContext'
 import { runProtocolScenarios, type ProtocolScenarioCoverage } from '../../analysis/protocolScenarioRunner'
 import { runProtocolScenarioExploration, type ProtocolExplorationCoverage } from '../../analysis/protocolScenarioExploration'
 import { scenarioHarnessIdentity } from '../../analysis/protocolScenarioArtifact'
@@ -395,6 +399,9 @@ export function useAnalyzer() {
       let hasMore = false
       let nextCursor: string | undefined
       let tokenSymbol: string | undefined
+      let pinDetail: string
+      let discoveryDetail: string
+      let resolveDetail: string
       patchPhase('pin', { status: 'running' })
       if (isFixture) {
         const fixture = syntheticSources()
@@ -407,9 +414,12 @@ export function useAnalyzer() {
         limitations = fixture.limitations
         discovered = pools.length
         tokenSymbol = 'DEMO'
-        patchPhase('pin', { status: 'completed', completed: 1 })
-        patchPhase('discover', { status: 'completed', completed: 1, detail: `${pools.length} deterministic pools` })
-        patchPhase('resolve', { status: 'completed', completed: 1, detail: `${subjects.length} codehash fixtures` })
+        pinDetail = `Block ${blockNumber} · deterministic fixture`
+        discoveryDetail = `${pools.length} deterministic pools`
+        resolveDetail = `${subjects.length} codehash fixtures`
+        patchPhase('pin', { status: 'completed', completed: 1, detail: pinDetail })
+        patchPhase('discover', { status: 'completed', completed: 1, detail: discoveryDetail })
+        patchPhase('resolve', { status: 'completed', completed: 1, detail: resolveDetail })
       } else {
         const client = getPublicClient(chain)
         const sources = await loadScanSources({
@@ -432,12 +442,14 @@ export function useAnalyzer() {
         hasMore = sources.hasMore
         nextCursor = sources.nextCursor
         tokenSymbol = sources.tokenMetadata.symbol
-        patchPhase('pin', { status: 'completed', completed: 1, detail: `Block ${blockNumber}` })
-        const discoveryDetail = sources.discovery.source === 'index+tail'
+        pinDetail = `Block ${blockNumber}`
+        discoveryDetail = sources.discovery.source === 'index+tail'
           ? `${discovered} pools · index verified + recent tail · ${sources.discovery.requests} reads`
           : `${discovered} pools · bounded log fallback · ${sources.discovery.requests} reads`
+        resolveDetail = `${subjects.length} unique codehashes`
+        patchPhase('pin', { status: 'completed', completed: 1, detail: pinDetail })
         patchPhase('discover', { status: 'completed', completed: 1, detail: discoveryDetail })
-        patchPhase('resolve', { status: 'completed', completed: 1, detail: `${subjects.length} unique codehashes` })
+        patchPhase('resolve', { status: 'completed', completed: 1, detail: resolveDetail })
       }
 
       setState((current) => ({ ...current, progress: 43, detail: 'Mapping reachable bytecode behavior' }))
@@ -486,6 +498,7 @@ export function useAnalyzer() {
       let liveReplay: LivePoolReplayCoverage | undefined
       let liveRouterScenarios: LiveRouterScenarioCoverage | undefined
       let liveForkExploration: LiveForkExplorationCoverage | undefined
+      let routerContexts: HistoricalRouterContexts | undefined
       let protocolScenarios: ProtocolScenarioCoverage | undefined
       let protocolExploration: ProtocolExplorationCoverage | undefined
       let pinnedBlockContext: { timestamp: bigint; baseFeePerGas: bigint | null; gasLimit: bigint; miner: Address } | undefined
@@ -641,6 +654,27 @@ export function useAnalyzer() {
           patchPhase('replay', { status: 'degraded', detail: `Historical replay unavailable · ${historicalReplayFailure}` })
         }
 
+        // 1b. Recognize the routers behind the receipt-matched replays, once.
+        //     Both later historical phases consume this, so a router's runtime
+        //     is read at most once per scan and both phases necessarily agree
+        //     on whether it was recognized.
+        if (liveReplay) {
+          patchPhase('scenarios', { status: 'running', detail: 'Recognizing historical v4 router contexts' })
+          try {
+            routerContexts = await prepareHistoricalRouterContexts({
+              replay: liveReplay,
+              pools,
+              poolManager,
+              loadHydration: (stateBlockNumber, request) => hydrationCache.load(stateBlockNumber, request),
+              signal: controller.signal,
+            })
+          } catch (error) {
+            if (controller.signal.aborted) throw error
+            // Recognition is optional: exact replay stands without it.
+            routerContexts = undefined
+          }
+        }
+
         // 2. Generated PoolManager scenarios. These need a discovered pool and
         //    pinned reads, nothing else: not a replay result, not a recognized
         //    router, not historical calldata, not a PositionManager attribution.
@@ -686,8 +720,8 @@ export function useAnalyzer() {
 
         // 3. Historical-router variants. Extra evidence layered on a replay that
         //    matched its receipt, so this one legitimately depends on step 1.
-        patchPhase('scenarios', { status: 'running', detail: 'Recognizing official v4 router payloads and preserving settlement commands' })
-        setState((current) => ({ ...current, progress: 82, detail: 'Running controlled official-router variants through PoolManager' }))
+        patchPhase('scenarios', { status: 'running', detail: 'Running controlled historical-router variants' })
+        setState((current) => ({ ...current, progress: 82, detail: 'Running controlled historical-router variants through PoolManager' }))
         if (liveReplay) {
           liveRouterScenarios = await runLiveRouterScenarios({
             scanId,
@@ -695,6 +729,7 @@ export function useAnalyzer() {
             poolManager,
             pools,
             replay: liveReplay,
+            routerContexts,
             signal: controller.signal,
             maxWorkers: workerBudget,
             createSession: (options) => new ForkExecutionSession({
@@ -703,7 +738,7 @@ export function useAnalyzer() {
             }),
             onProgress: (completed, total, detail) => {
               patchPhase('scenarios', { status: 'running', completed, total, detail })
-              setState((current) => ({ ...current, detail: `Official router context · ${detail}` }))
+              setState((current) => ({ ...current, detail: `Historical router context · ${detail}` }))
             },
           })
           patchPhase('scenarios', {
@@ -733,6 +768,14 @@ export function useAnalyzer() {
             stateBlockNumber: blockNumber,
             pinnedBlock: pinnedBlockContext,
             contexts: protocolScenarios?.contexts,
+            // Shapes the scenario suite already proved reach the selected pool
+            // at this block skip a redundant warm run; anything absent here is
+            // validated by exploration itself.
+            validatedScenarioIds: new Set(
+              (protocolScenarios?.outcomes ?? [])
+                .filter((outcome) => outcome.status === 'completed' || outcome.status === 'reverted')
+                .map((outcome) => outcome.scenarioId),
+            ),
             signal: controller.signal,
             createSession: (options) => new ForkExplorationSession({
               ...options,
@@ -745,8 +788,9 @@ export function useAnalyzer() {
           })
         }
 
-        // 5. Historical-router exploration. Extra evidence, again replay-derived.
-        setState((current) => ({ ...current, progress: 88, detail: 'Exploring masked router inputs against pinned pool state' }))
+        // 5. Historical-router exploration. Extra evidence, again replay-derived,
+        //    and using exactly the recognition decision phase 3 used.
+        setState((current) => ({ ...current, progress: 88, detail: 'Exploring masked historical-router inputs' }))
         if (liveReplay) {
           liveForkExploration = await runLiveForkExploration({
             scanId,
@@ -754,6 +798,7 @@ export function useAnalyzer() {
             poolManager,
             pools,
             replay: liveReplay,
+            routerContexts,
             signal: controller.signal,
             maxWorkers: workerBudget,
             createSession: (options) => new ForkExplorationSession({
@@ -786,7 +831,10 @@ export function useAnalyzer() {
             ? `${subjects.length} bytecode identities · ${sourceCoverage.compiled}/${sourceCoverage.attempted} exact-source AST passes`
             : `${subjects.length} bytecode identities · no verified source bundle selected`,
         }
-        if (['pin', 'discover', 'resolve', 'report'].includes(phase.id)) return { ...phase, status: 'completed' as const, completed: 1 }
+        if (phase.id === 'pin') return { ...phase, status: 'completed' as const, completed: 1, detail: pinDetail }
+        if (phase.id === 'discover') return { ...phase, status: 'completed' as const, completed: 1, detail: discoveryDetail }
+        if (phase.id === 'resolve') return { ...phase, status: 'completed' as const, completed: 1, detail: resolveDetail }
+        if (phase.id === 'report') return { ...phase, status: 'completed' as const, completed: 1 }
         if (phase.id === 'replay' && executionProof) return { ...phase, status: 'completed' as const, completed: fixtureHydration ? 2 : 1, total: fixtureHydration ? 2 : 1, detail: fixtureHydration ? `${executionProof.steps.length} instructions · ${fixtureHydration.hydrationRequests} cold reads · ${fixtureReuseHydrationRequests ?? 0} warm reads` : `${executionProof.steps.length} instructions observed in revm Wasm` }
         if (phase.id === 'replay' && liveReplay) return {
           ...phase,
@@ -843,7 +891,10 @@ export function useAnalyzer() {
         adapterVersion: ADAPTER_VERSION,
         scenarioVersion: hackenSuite
           ? `${hackenSuite.version}@${hackenSuite.upstreamCommit}`
-          : liveRouterScenarios
+          // Either live suite makes this a live report. Historical replay can
+          // fail while generated scenarios pass, and stamping the fixture
+          // version there would make a current public report look outdated.
+          : liveRouterScenarios || protocolScenarios || protocolExploration
             ? LIVE_SCENARIO_VERSION
             : FIXTURE_SCENARIO_VERSION,
         engineVersions: {
@@ -937,6 +988,7 @@ export function useAnalyzer() {
             : liveReplay || protocolScenarios || protocolExploration
               ? [
                   ...(liveReplay?.limitations ?? [`Historical replay did not run · ${historicalReplayFailure}`]),
+                  ...(routerContexts?.limitations ?? []),
                   ...(protocolScenarios?.limitations ?? []),
                   ...(liveRouterScenarios?.limitations ?? []),
                   ...(protocolExploration?.limitations ?? []),

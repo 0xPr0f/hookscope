@@ -8,7 +8,7 @@ export type RevmCallEvidence = {
   scheme: string
   value: string
   inputLength: number
-  /** Absent when the call input lived in the shared interpreter buffer. */
+  /** First four input bytes; absent only when the call carried fewer than four. */
   selector?: Hex
 }
 export type RevmStorageDiff = { address: string; slot: Hex; before: Hex; after: Hex }

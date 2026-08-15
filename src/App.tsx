@@ -80,7 +80,7 @@ function PhaseRail({ report }: { report: AnalysisReport }) {
           </span>
           <div className="phase-copy">
             <b>{phase.label}</b>
-            {phase.status === 'degraded' && phase.detail && <small>{phase.detail}</small>}
+            {phase.detail && <small>{phase.detail}</small>}
           </div>
         </div>
       ))}
@@ -181,7 +181,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
             </section>
             <section>
               <p className="eyebrow">Capability coverage</p>
-              <h3>{Object.values(report.capabilities).filter((capability) => capability.status === 'passed').length} of 4 passed</h3>
+              <h3>{Object.values(report.capabilities).filter((capability) => capability.status === 'passed').length} of {Object.keys(report.capabilities).length} passed</h3>
               <ul className="capability-list">
                 {Object.entries(report.capabilities).map(([name, capability]) => <li key={name}><span className={capability.status}>{capability.status === 'passed' ? '●' : '○'}</span>{name}<small>{capability.status}</small></li>)}
               </ul>

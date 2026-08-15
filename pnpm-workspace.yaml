@@ -1,0 +1,3 @@
+# Keep install-time settings explicit and reproducible in CI. The committed
+# lockfile was generated with workspace package injection enabled.
+injectWorkspacePackages: true

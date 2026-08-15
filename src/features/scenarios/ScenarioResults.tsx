@@ -74,7 +74,7 @@ export function ScenarioResults({ report }: { report: AnalysisReport }) {
       <div className="scenario-explainer">
         <p><strong>Full port.</strong> The 40-scenario port runs against Hookscope’s generated real-PoolManager fixture on desktop. It validates the browser execution engine against deterministic expected outcomes.</p>
         <p><strong>Generated scenarios.</strong> A small, pinned, reviewed Uniswap-derived scenario harness is injected at pinned state and drives swaps, liquidity changes and donations through the deployed PoolManager’s real unlock and settlement flow. This suite needs only a discovered pool: no historical transaction, router, or calldata. A revert is an observation about the pool, not a failure.</p>
-        <p><strong>Live context.</strong> A public pool is counted only when a receipt-matched router trace reaches the real PoolManager and selected hook. Supported official envelopes receive controlled variants; custom envelopes remain byte-identical observations. Direct hook calls are not tests.</p>
+        <p><strong>Live context.</strong> A public pool is counted only when a receipt-matched router trace reaches the real PoolManager and selected hook. Recognized historical routers receive controlled variants: an official Uniswap envelope is decoded from its published ABI, while an attested custom router template is derived from pinned runtime bytecode and reproduced execution — never from verified source. An unrecognized envelope stays a byte-identical observation. Direct hook calls are not tests.</p>
       </div>
       <div className="test-suite-list">{suites.map((suite) => <SuiteConsole suite={suite} key={suite.id} />)}</div>
       <div className="scenario-gates">

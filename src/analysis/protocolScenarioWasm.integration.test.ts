@@ -75,7 +75,7 @@ function snapshotWithHarness(router: Address = ROUTER) {
   const overlay = buildScenarioStateOverlay({
     poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
     poolManagerAccount: { balance: manager!.balance, nonce: manager!.nonce, code: manager!.code },
-    router,
+    routers: [router],
     actors: [ACTOR],
     currencies: [HACKEN_FIXTURE_CONTEXT.currency0, HACKEN_FIXTURE_CONTEXT.currency1],
   })

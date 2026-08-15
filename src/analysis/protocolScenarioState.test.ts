@@ -35,7 +35,7 @@ describe('generated-scenario state overlay', () => {
     const overlay = buildScenarioStateOverlay({
       poolManager: POOL_MANAGER,
       poolManagerAccount: { balance: toHex(5n, { size: 32 }), nonce: 7, code: '0x6001' as Hex },
-      router: ROUTER,
+      routers: [ROUTER],
       actors: [ACTOR],
       currencies: [CURRENCY0, CURRENCY1],
     })
@@ -60,7 +60,7 @@ describe('generated-scenario state overlay', () => {
     const overlay = buildScenarioStateOverlay({
       poolManager: POOL_MANAGER,
       poolManagerAccount: { balance: '0x0' as Hex, nonce: 0, code: '0x60' as Hex },
-      router: ROUTER,
+      routers: [ROUTER],
       actors: [ACTOR],
       currencies: [CURRENCY0, CURRENCY1],
     })
@@ -77,7 +77,7 @@ describe('generated-scenario state overlay', () => {
     const overlay = buildScenarioStateOverlay({
       poolManager: POOL_MANAGER,
       poolManagerAccount: { balance: '0x0' as Hex, nonce: 0, code: '0x60' as Hex },
-      router: ROUTER,
+      routers: [ROUTER],
       actors: [ACTOR],
       currencies: [CURRENCY0, CURRENCY1],
     })

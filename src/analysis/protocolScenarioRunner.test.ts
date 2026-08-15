@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { toHex, type Address, type Hex, type PublicClient } from 'viem'
 import type { PoolDescriptor } from '../domain/report'
 import { decodeSlot0 } from './protocolScenarioContext'
+import { POOL_EVENT_TOPICS } from './protocolScenarioValidation'
 import { runProtocolScenarios } from './protocolScenarioRunner'
 import type { ForkReplayResult } from './revmProof'
 
@@ -18,17 +19,44 @@ const pool: PoolDescriptor = {
   activity: 1,
 }
 
-function replay(success = true): ForkReplayResult {
+const ROUTER = '0x0000000000000000000000000000000000005ce4' as Address
+const ACTOR = '0x00000000000000000000000000000000000ac7a1' as Address
+
+/** Trace of a scenario that really entered the PoolManager and reached the hook. */
+function poolCalls() {
+  return [
+    { caller: ACTOR, target: ROUTER, bytecodeAddress: ROUTER, scheme: 'Call', value: '0', inputLength: 644, selector: '0x543b46f9' as Hex },
+    { caller: ROUTER, target: POOL_MANAGER, bytecodeAddress: POOL_MANAGER, scheme: 'Call', value: '0', inputLength: 708, selector: '0x48c89491' as Hex },
+    { caller: POOL_MANAGER, target: HOOK, bytecodeAddress: HOOK, scheme: 'Call', value: '0', inputLength: 356, selector: '0x575e24b4' as Hex },
+  ]
+}
+
+/** Every pool event the matrix can require, all naming the selected pool. */
+function poolLogs() {
+  return [
+    { address: POOL_MANAGER, topics: [POOL_EVENT_TOPICS.swap, pool.poolId] as Hex[], data: '0x' as Hex },
+    { address: POOL_MANAGER, topics: [POOL_EVENT_TOPICS.donate, pool.poolId] as Hex[], data: '0x' as Hex },
+    { address: POOL_MANAGER, topics: [POOL_EVENT_TOPICS.modifyLiquidity, pool.poolId] as Hex[], data: '0x' as Hex },
+  ]
+}
+
+function replay(success = true, overrides: Partial<ForkReplayResult['proof']> = {}): ForkReplayResult {
   return {
     hydrationRequests: 0,
     hydratedAccounts: 0,
     hydratedStorageSlots: 0,
     proof: {
       engine: 'revm/36.0.0', success, gasUsed: 100, output: '0x',
-      steps: [], storageOperations: [], calls: [], storageDiffs: [],
-      balanceChanges: [], logs: [], logCount: 0, selfdestructs: [], truncated: false,
+      steps: [], storageOperations: [], calls: poolCalls(), storageDiffs: [],
+      balanceChanges: [], logs: poolLogs(), logCount: 3, selfdestructs: [], truncated: false,
+      ...overrides,
     },
   }
+}
+
+/** The harness binding preflight: `poolManager()` returning the real manager. */
+function bindingReply(manager: Address = POOL_MANAGER): ForkReplayResult {
+  return replay(true, { output: `0x${manager.slice(2).toLowerCase().padStart(64, '0')}` as Hex, calls: [], logs: [], logCount: 0 })
 }
 
 /** slot0 packs sqrtPriceX96(160) | tick(24) | protocolFee(24) | lpFee(24). */
@@ -37,21 +65,43 @@ function slot0Word(sqrtPriceX96: bigint, tick: number): Hex {
   return toHex(sqrtPriceX96 | (raw << 160n), { size: 32 })
 }
 
-function client(slot0: Hex) {
+/**
+ * Only the PoolManager holds code and balance; every other address is empty, so
+ * the synthetic router and actor slots are free to claim.
+ */
+function client(slot0: Hex, occupied: Address[] = []) {
+  const taken = new Set([POOL_MANAGER.toLowerCase(), ...occupied.map((address) => address.toLowerCase())])
+  const isTaken = ({ address }: { address: Address }) => taken.has(address.toLowerCase())
   return {
-    getBalance: async () => 1n,
+    getBalance: async (args: { address: Address }) => (isTaken(args) ? 1n : 0n),
     getTransactionCount: async () => 0,
-    getCode: async () => '0x60' as Hex,
+    getCode: async (args: { address: Address }) => (isTaken(args) ? '0x60' as Hex : '0x' as Hex),
     readContract: async () => slot0,
   } as unknown as PublicClient
 }
 
 const pinnedBlock = { timestamp: 1_000n, baseFeePerGas: 5n, gasLimit: 30_000_000n, miner: POOL_MANAGER }
 
-function session(execute = vi.fn(async () => replay())) {
+/**
+ * Answers the binding preflight first, then defers to the scenario behavior, so
+ * a test only has to describe the scenario it cares about.
+ */
+function session(scenarioExecute = vi.fn(async () => replay()), binding = bindingReply) {
   const close = vi.fn()
+  const gasPrices: bigint[] = []
+  let first = true
+  const execute = vi.fn(async (input: { transaction: { gasPrice: bigint } }) => {
+    gasPrices.push(input.transaction.gasPrice)
+    if (first) {
+      first = false
+      return binding()
+    }
+    return scenarioExecute()
+  })
   return {
     execute,
+    scenarioExecute,
+    gasPrices,
     close,
     factory: () => ({ execute, metrics: () => ({ hydratedAccounts: 0, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 4, executions: 0 }), close }),
   }
@@ -85,7 +135,72 @@ describe('generated scenario runner', () => {
     expect(coverage.completed).toBeGreaterThan(20)
     expect(coverage.failed).toBe(0)
     expect(coverage.hydrationReads).toBe(4)
+    expect(spy.gasPrices.length).toBeGreaterThan(1)
+    expect(spy.gasPrices.every((gasPrice) => gasPrice === pinnedBlock.baseFeePerGas)).toBe(true)
     expect(spy.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses to run scenarios when the injected harness is bound elsewhere', async () => {
+    const wrong = '0x9999999999999999999999999999999999999999' as Address
+    const coverage = await runProtocolScenarios({
+      scanId: 'protocol-test',
+      client: client(slot0Word(79_228_162_514_264_337_593_543_950_336n, 0)),
+      chainId: 1,
+      poolManager: POOL_MANAGER,
+      pools: [pool],
+      stateBlockNumber: 100n,
+      pinnedBlock,
+      signal: new AbortController().signal,
+      createSession: session(vi.fn(async () => replay()), () => bindingReply(wrong)).factory,
+    })
+
+    expect(coverage.completed).toBe(0)
+    expect(coverage.outcomes).toHaveLength(1)
+    expect(coverage.outcomes[0]).toMatchObject({ scenarioId: 'harness-binding', status: 'failed' })
+    expect(coverage.findings.every((finding) => finding.detectorId === 'protocol-native-scenario-suite')).toBe(true)
+  })
+
+  it('does not report a revert that never reached the PoolManager as hook behavior', async () => {
+    // A harness that reverts decoding its own arguments never calls unlock.
+    const decodeRevert = replay(false, { calls: [poolCalls()[0]!], logs: [], logCount: 0 })
+    const coverage = await runProtocolScenarios({
+      scanId: 'protocol-test',
+      client: client(slot0Word(79_228_162_514_264_337_593_543_950_336n, 0)),
+      chainId: 1,
+      poolManager: POOL_MANAGER,
+      pools: [pool],
+      stateBlockNumber: 100n,
+      pinnedBlock,
+      signal: new AbortController().signal,
+      createSession: session(vi.fn(async () => decodeRevert)).factory,
+    })
+
+    expect(coverage.reverted).toBe(0)
+    expect(coverage.failed).toBeGreaterThan(0)
+    expect(coverage.outcomes.some((outcome) => outcome.reason?.includes('before reaching unlock'))).toBe(true)
+    // No observation may be published for a call that never touched the pool.
+    expect(coverage.findings.filter((finding) => finding.detectorId === 'protocol-native-scenario')).toHaveLength(0)
+  })
+
+  it('refuses a completed swap whose event names a different pool', async () => {
+    const otherPool = replay(true, {
+      logs: [{ address: POOL_MANAGER, topics: [POOL_EVENT_TOPICS.swap, `0x${'99'.repeat(32)}` as Hex], data: '0x' as Hex }],
+      logCount: 1,
+    })
+    const coverage = await runProtocolScenarios({
+      scanId: 'protocol-test',
+      client: client(slot0Word(79_228_162_514_264_337_593_543_950_336n, 0)),
+      chainId: 1,
+      poolManager: POOL_MANAGER,
+      pools: [pool],
+      stateBlockNumber: 100n,
+      pinnedBlock,
+      signal: new AbortController().signal,
+      createSession: session(vi.fn(async () => otherPool)).factory,
+    })
+
+    expect(coverage.completed).toBe(0)
+    expect(coverage.outcomes.some((outcome) => outcome.reason?.includes('different pool'))).toBe(true)
   })
 
   it('marks generated evidence as such and attaches no historical transaction', async () => {

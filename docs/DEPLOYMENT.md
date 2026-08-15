@@ -1,12 +1,14 @@
 # Vercel and Railway deployment runbook
 
-This runbook deploys the Vite application and its optional report-storage API to Vercel, with PostgreSQL on Railway. It does not create a server-side analyzer: RPC reads, source retrieval, bytecode analysis, replay, and fuzzing continue to execute in the browser. The only server-side routes append and read completed reports.
+This runbook deploys the Vite application, its narrow subgraph proxy, and its optional report-storage API to Vercel, with PostgreSQL on Railway. It does not create a server-side analyzer: RPC reads, source retrieval, bytecode analysis, replay, and fuzzing continue to execute in the browser. Server-side routes proxy the allowlisted pool-discovery query and append/read completed reports.
 
 ```text
 Browser -> Vercel CDN (dist/)
         -> Vercel Functions (/api/reports*)
                            |
                            `-> Railway PostgreSQL (TLS, public TCP proxy)
+        -> Vercel Function  (/api/subgraph/:chainId)
+                           `-> The Graph gateway
 ```
 
 Vercel and Railway are separate networks. A Vercel Function cannot use Railway's private `DATABASE_URL`; construct the Vercel secret from Railway's external/TCP-proxy host and port (shown by Railway as `DATABASE_PUBLIC_URL`) and the least-privilege runtime role created below. Keep preview and production on separate databases or Railway environments.
@@ -16,9 +18,9 @@ Vercel and Railway are separate networks. A Vercel Function cannot use Railway's
 | Variable | Visibility | Purpose |
 |---|---|---|
 | `DATABASE_URL` | Vercel Functions only | PostgreSQL URL for the runtime role. Set separately for Preview and Production. Never prefix it with `VITE_`. |
+| `SUBGRAPH_API_KEY` | Vercel Function only | Graph Network key used by the allowlisted `/api/subgraph/<chainId>` proxy. Never prefix it with `VITE_`. |
 | `VITE_RPC_<chainId>` | Public browser bundle | Optional RPC override. Use a public endpoint or a browser/domain-restricted credential. |
-| `VITE_GRAPH_API_KEY` | Public browser bundle | One domain-restricted Graph Network key; serves every chain whose subgraph ID is in the registry. |
-| `VITE_V4_SUBGRAPH_<chainId>` | Public browser bundle | Optional v4 GraphQL endpoint. Use only browser-safe credentials. |
+| `VITE_V4_SUBGRAPH_<chainId>` | Public browser bundle | Optional credential-free v4 GraphQL endpoint. |
 
 `VITE_` values are build-time public configuration: anyone can inspect them in the generated JavaScript. Vercel environment changes affect only later deployments, so rebuild after every change. Do not commit `.env.local`, `.env.preview`, `.env.production`, Vercel's `.vercel/` link metadata, or either database URL.
 
@@ -98,8 +100,8 @@ vercel env add DATABASE_URL preview
 vercel env add DATABASE_URL production
 vercel env add VITE_RPC_1 preview
 vercel env add VITE_RPC_1 production
-vercel env add VITE_GRAPH_API_KEY preview
-vercel env add VITE_GRAPH_API_KEY production
+vercel env add SUBGRAPH_API_KEY preview
+vercel env add SUBGRAPH_API_KEY production
 vercel env ls
 ```
 
