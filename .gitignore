@@ -8,3 +8,4 @@ crates/revm-wasm/target/
 .vercel/
 playwright-report/
 test-results/
+out/
