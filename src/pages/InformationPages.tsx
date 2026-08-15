@@ -198,7 +198,7 @@ export function HowItWorksPage() {
 
           <section id="report" className="info-section">
             <p className="eyebrow">Reading the output</p>
-            <h2>A report describes coverage—not a blanket verdict.</h2>
+            <h2>A report describes coverage, not a blanket verdict.</h2>
             <div className="report-reading-grid">
               <div><FileSearch size={18} /><h3>Overview</h3><p>Pool coverage, strongest observed impact, callbacks, capabilities, and limitations.</p></div>
               <div><CircleDot size={18} /><h3>Evidence</h3><p>Claim, subject, evidence class, confidence, affected pool, trace details, and replay status.</p></div>
@@ -307,7 +307,7 @@ export function MethodologyPage() {
 
           <section id="limits" className="info-section">
             <p className="eyebrow">Interpretation</p>
-            <h2>What a completed report does—and does not—mean.</h2>
+            <h2>What a completed report does and does not mean.</h2>
             <div className="interpretation-grid">
               <div className="does"><span>It does</span><ul><li>Identify the pools and code examined.</li><li>Separate facts, paths, and observed outcomes.</li><li>Record exact engine and scenario versions.</li><li>Expose pool, chain, execution, and time limits.</li><li>Preserve samples for reproducible observations.</li></ul></div>
               <div className="does-not"><span>It does not</span><ul><li>Claim every possible input or future state was tested.</li><li>Treat unavailable replay as successful replay.</li><li>Equate verified source with unchanged deployed code.</li><li>Mutate unknown or signature-bearing envelopes speculatively.</li><li>Describe a contract as universally safe.</li></ul></div>

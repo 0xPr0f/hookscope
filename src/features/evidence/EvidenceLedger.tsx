@@ -1,7 +1,15 @@
 import { useMemo, useState, type KeyboardEvent } from 'react'
 import { ChevronDown } from 'lucide-react'
 import type { Evidence, Severity } from '../../domain/report'
+import type { SelectorSignatureLookup } from '../../domain/selectors'
 import { AppDropdown, type AppDropdownOption } from '../../components/AppDropdown'
+import {
+  SelectorAwareText,
+  SelectorCatalogList,
+  SelectorInline,
+  selectorAwareJson,
+  selectorsForDisplay,
+} from '../selectors/SelectorDisplay'
 import { EVIDENCE_SEVERITY_META, groupEvidenceBySeverity } from './evidenceGrouping'
 
 type StorageLayoutEntry = {
@@ -49,10 +57,11 @@ function storageLayoutFromTechnical(technical: Evidence['technical']): StorageLa
   })
 }
 
-function EvidenceRow({ finding }: { finding: Evidence }) {
+function EvidenceRow({ finding, selectorSignatures }: { finding: Evidence; selectorSignatures?: SelectorSignatureLookup }) {
   const [open, setOpen] = useState(false)
   const detailId = `evidence-detail-${finding.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   const storageLayout = storageLayoutFromTechnical(finding.technical)
+  const technicalSelectors = selectorsForDisplay(finding.technical, selectorSignatures).map((entry) => entry.selector)
   const toggle = () => setOpen((value) => !value)
 
   const handleRowClick = () => {
@@ -85,8 +94,8 @@ function EvidenceRow({ finding }: { finding: Evidence }) {
           <SeverityBadge severity={finding.severity} />
         </span>
         <span className="evidence-copy">
-          <strong>{finding.title}</strong>
-          <span>{finding.claim}</span>
+          <strong><SelectorAwareText lookup={selectorSignatures} subject={finding.subject}>{finding.title}</SelectorAwareText></strong>
+          <span><SelectorAwareText lookup={selectorSignatures} subject={finding.subject}>{finding.claim}</SelectorAwareText></span>
         </span>
         <span className="evidence-tags" aria-label={`${evidenceClassLabel(finding.evidenceClass)}, ${finding.confidence} confidence`}>
           <span>{evidenceClassLabel(finding.evidenceClass)}</span>
@@ -136,8 +145,8 @@ function EvidenceRow({ finding }: { finding: Evidence }) {
                       <tr key={entry.slot}>
                         <td><code>{entry.slot}</code></td>
                         <td>{entry.type ?? 'Unknown'}</td>
-                        <td>{entry.writes.length ? entry.writes.map((item) => <code key={item}>{item}</code>) : '—'}</td>
-                        <td>{entry.reads.length ? entry.reads.map((item) => <code key={item}>{item}</code>) : '—'}</td>
+                        <td>{entry.writes.length ? entry.writes.map((item) => <SelectorInline compact key={item} selector={item} lookup={selectorSignatures} subject={finding.subject} />) : 'Not recorded'}</td>
+                        <td>{entry.reads.length ? entry.reads.map((item) => <SelectorInline compact key={item} selector={item} lookup={selectorSignatures} subject={finding.subject} />) : 'Not recorded'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -152,7 +161,7 @@ function EvidenceRow({ finding }: { finding: Evidence }) {
               <div className="evidence-table-scroll">
                 <table className="evidence-storage-table">
                   <thead><tr><th>Slot</th><th>Before</th><th>After</th></tr></thead>
-                  <tbody>{finding.storage.map((item) => <tr key={item.slot}><td><code>{item.slot}</code></td><td><code>{item.before ?? '—'}</code></td><td><code>{item.after ?? '—'}</code></td></tr>)}</tbody>
+                  <tbody>{finding.storage.map((item) => <tr key={item.slot}><td><code>{item.slot}</code></td><td><code>{item.before ?? 'Not recorded'}</code></td><td><code>{item.after ?? 'Not recorded'}</code></td></tr>)}</tbody>
                 </table>
               </div>
             </div>
@@ -166,15 +175,25 @@ function EvidenceRow({ finding }: { finding: Evidence }) {
                 <div><dt>To</dt><dd><code>{finding.witness.to}</code></dd></div>
                 <div><dt>Block</dt><dd>{finding.witness.blockNumber}</dd></div>
                 <div><dt>Value</dt><dd>{finding.witness.value}</dd></div>
-                <div className="evidence-witness-input"><dt>Input</dt><dd><code>{finding.witness.input}</code></dd></div>
+                <div className="evidence-witness-input"><dt>Input</dt><dd>
+                  {finding.witness.input.length >= 10 && <SelectorInline selector={finding.witness.input.slice(0, 10)} lookup={selectorSignatures} subject={finding.witness.to} />}
+                  <code>{finding.witness.input}</code>
+                </dd></div>
               </dl>
+            </div>
+          )}
+
+          {technicalSelectors.length > 0 && (
+            <div className="evidence-block">
+              <h4>Function and error selectors <span>{technicalSelectors.length}</span></h4>
+              <SelectorCatalogList selectors={technicalSelectors} lookup={selectorSignatures} subject={finding.subject} />
             </div>
           )}
 
           {finding.technical && (
             <details className="evidence-raw">
-              <summary>Raw technical record</summary>
-              <pre>{JSON.stringify(finding.technical, null, 2)}</pre>
+              <summary>Readable technical record</summary>
+              <pre>{selectorAwareJson(finding.technical, selectorSignatures)}</pre>
             </details>
           )}
         </div>
@@ -183,7 +202,7 @@ function EvidenceRow({ finding }: { finding: Evidence }) {
   )
 }
 
-export function EvidenceLedger({ findings }: { findings: Evidence[] }) {
+export function EvidenceLedger({ findings, selectorSignatures }: { findings: Evidence[]; selectorSignatures?: SelectorSignatureLookup }) {
   const [selectedSeverity, setSelectedSeverity] = useState<EvidenceFilter>('all')
   const groups = useMemo(() => groupEvidenceBySeverity(findings), [findings])
   const sortedFindings = useMemo(() => groups.flatMap((group) => group.findings), [groups])
@@ -227,7 +246,7 @@ export function EvidenceLedger({ findings }: { findings: Evidence[] }) {
         />
       </div>
       <div className="evidence-list" aria-live="polite">
-        {displayedFindings.map((finding) => <EvidenceRow finding={finding} key={finding.id} />)}
+        {displayedFindings.map((finding) => <EvidenceRow finding={finding} selectorSignatures={selectorSignatures} key={finding.id} />)}
       </div>
     </div>
   )

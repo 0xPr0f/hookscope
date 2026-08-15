@@ -1,5 +1,7 @@
 import { ChevronDown, ExternalLink } from 'lucide-react'
 import type { AnalysisReport } from '../../domain/report'
+import type { SelectorSignatureLookup } from '../../domain/selectors'
+import { SelectorAwareText } from '../selectors/SelectorDisplay'
 import {
   buildScenarioConsoleSuites,
   HACKEN_UPSTREAM_COMMIT,
@@ -35,11 +37,11 @@ const FIXTURE_EXECUTION_LANES = [
   {
     number: '01',
     title: 'Fixture conformance',
-    description: 'Runs the complete 40-case port against deterministic expected outcomes. It validates the browser execution engine—not a public pool—and appears only on the fixture report.',
+    description: 'Runs the complete 40-case port against deterministic expected outcomes. It validates the browser execution engine, not a public pool, and appears only on the fixture report.',
   },
 ] as const
 
-function ResultLine({ line }: { line: ScenarioConsoleLine }) {
+function ResultLine({ line, selectorSignatures }: { line: ScenarioConsoleLine; selectorSignatures?: SelectorSignatureLookup }) {
   return (
     <div className="test-console-line" data-status={line.status.toLowerCase()}>
       <span className={`test-result test-result-${line.status.toLowerCase()}`}>{SCENARIO_STATUS_LABELS[line.status]}</span>
@@ -48,14 +50,14 @@ function ResultLine({ line }: { line: ScenarioConsoleLine }) {
           <strong>{line.name}</strong>
           {line.gasUsed && <span className="test-gas">gas {Number(line.gasUsed).toLocaleString()}</span>}
         </div>
-        {line.description && <p className="test-description">{line.description}</p>}
-        {line.detail && <p className="test-detail"><span>Result</span>{line.detail}</p>}
+        {line.description && <p className="test-description"><SelectorAwareText lookup={selectorSignatures}>{line.description}</SelectorAwareText></p>}
+        {line.detail && <p className="test-detail"><span>Result</span><SelectorAwareText lookup={selectorSignatures}>{line.detail}</SelectorAwareText></p>}
       </div>
     </div>
   )
 }
 
-function SuiteConsole({ suite }: { suite: ScenarioConsoleSuite }) {
+function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSuite; selectorSignatures?: SelectorSignatureLookup }) {
   const sections = [...new Set(suite.lines.map((line) => line.section))]
   const executedTests = suite.ran
     ? suite.lines.filter((line) => line.status !== 'UNAVAILABLE' && line.status !== 'SKIP').length
@@ -116,7 +118,7 @@ function SuiteConsole({ suite }: { suite: ScenarioConsoleSuite }) {
                   <ChevronDown size={14} aria-hidden="true" />
                 </summary>
                 <div className="test-console-rows">
-                  {lines.map((line) => <ResultLine line={line} key={line.id} />)}
+                  {lines.map((line) => <ResultLine line={line} selectorSignatures={selectorSignatures} key={line.id} />)}
                 </div>
               </details>
             )
@@ -132,7 +134,7 @@ function SuiteConsole({ suite }: { suite: ScenarioConsoleSuite }) {
           {suite.elapsedMs !== undefined ? `; finished in ${suite.elapsedMs} ms` : ''}.</span>
         </div>
       </div>
-      {suite.reason && <p className="test-suite-reason">{suite.reason}</p>}
+      {suite.reason && <p className="test-suite-reason"><SelectorAwareText lookup={selectorSignatures}>{suite.reason}</SelectorAwareText></p>}
     </article>
   )
 }
@@ -173,7 +175,7 @@ export function ScenarioResults({ report }: { report: AnalysisReport }) {
           ))}
         </div>
       </div>
-      <div className="test-suite-list">{suites.map((suite) => <SuiteConsole suite={suite} key={suite.id} />)}</div>
+      <div className="test-suite-list">{suites.map((suite) => <SuiteConsole suite={suite} selectorSignatures={report.selectorSignatures} key={suite.id} />)}</div>
       {!fixtureReport && <div className="scenario-gates">
         <p className="eyebrow">Why a live suite may be skipped</p>
         <ul>

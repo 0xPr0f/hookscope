@@ -32,6 +32,7 @@ import { getPublicClient } from '../../data/rpc'
 import { createForkHydrationCache } from '../../data/forkHydrationCache'
 import { createScanRpcClient } from '../../data/scanRpcClient'
 import { fetchSourcify4ByteSignatures } from '../../data/signatureDatabase'
+import { resolveReportSelectors } from '../../analysis/selectorCatalog'
 import { parseTokenAddress } from '../../domain/address'
 import { currentClientUsesStaticOnlyMobileTier } from '../../domain/executionClient'
 import {
@@ -1106,7 +1107,7 @@ export function useAnalyzer() {
         return { ...phase, status: 'degraded' as const, detail: executionReason }
       })
       const exploredFinding = explorationFinding(exploration, pools[0]?.poolId)
-      const report: AnalysisReport = {
+      let report: AnalysisReport = {
         schemaVersion: '1',
         id: crypto.randomUUID(),
         source: 'browser',
@@ -1143,7 +1144,7 @@ export function useAnalyzer() {
           generatedScenarios: protocolScenarios?.version ?? 'not-run',
           erc20SettlementLane: erc20Lane?.version ?? 'not-run',
           generatedExplorer: protocolExploration?.strategy ?? 'not-run',
-          signatureResolver: protocolScenarios ? 'sourcify-4byte/v1' : 'not-run',
+          signatureResolver: 'sourcify-4byte/v2',
           ...(protocolScenarios || protocolExploration
             ? {
                 scenarioHarness: `${harness.contract}@${harness.templateHash}`,
@@ -1200,6 +1201,7 @@ export function useAnalyzer() {
         pools,
         poolCoverage: { discovered, analyzed: pools.length, hasMore, nextCursor },
         contractGraph: mergeNodes(preResolvedNodes, staticResult.nodes),
+        selectorSignatures: {},
         findings: [
           ...staticResult.findings,
           ...(sourceCoverage?.findings ?? []),
@@ -1250,10 +1252,32 @@ export function useAnalyzer() {
             : [executionReason]),
         ],
       }
+      const selectorResolution = await resolveReportSelectors({
+        report,
+        signal: controller.signal,
+        fetchCandidates: (selectors, signal) => fetchSourcify4ByteSignatures(selectors, signal),
+      })
+      const selectorDetail = `${selectorResolution.selectors.length - selectorResolution.unresolved.length}/${selectorResolution.selectors.length} observed selectors labeled${selectorResolution.externallyResolved ? ` · ${selectorResolution.externallyResolved} from Sourcify 4byte` : ''}`
+      report = {
+        ...report,
+        selectorSignatures: selectorResolution.lookup,
+        phases: report.phases.map((phase) => phase.id === 'report'
+          ? { ...phase, detail: selectorDetail }
+          : phase),
+        limitations: [
+          ...report.limitations,
+          ...(selectorResolution.failure
+            ? [`Selector-name lookup degraded: ${selectorResolution.failure}. Exact ABI and canonical-interface names remain available.`]
+            : []),
+          ...(selectorResolution.unresolved.length
+            ? [`${selectorResolution.unresolved.length} observed four-byte selector${selectorResolution.unresolved.length === 1 ? ' has' : 's have'} no exact ABI, canonical-interface, or Sourcify 4byte candidate; those values remain explicitly raw.`]
+            : []),
+        ],
+      }
       patchPhase('report', { status: 'completed', completed: 1 })
       if (controller.signal.aborted) throw new DOMException('Analysis cancelled', 'AbortError')
       const persistence = await persistCompletedReport(report)
-      setState({ status: 'completed', progress: 100, detail: 'Completed', phases: finalPhases, report, history: cached, persistence })
+      setState({ status: 'completed', progress: 100, detail: 'Completed', phases: report.phases, report, history: cached, persistence })
       abortRef.current = null
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return

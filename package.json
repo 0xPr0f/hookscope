@@ -17,6 +17,7 @@
     "canary:chains": "node scripts/chain-canary.mjs",
     "pool-index:generate": "node scripts/generate-pool-index.mjs",
     "pool-index:validate": "node scripts/validate-pool-index.mjs",
+    "fixtures:ast": "node scripts/generate-dependency-ast-fixture.mjs",
     "wasm:build": "pnpm wasm:build:revm && pnpm wasm:build:fuzz",
     "wasm:build:revm": "wasm-pack build crates/revm-wasm --target web --out-dir ../../src/wasm/revm --release",
     "wasm:build:fuzz": "wasm-pack build crates/revm-wasm --target web --out-dir ../../src/wasm/fuzz --release --features libafl-fuzz",

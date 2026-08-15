@@ -43,7 +43,10 @@ export const FIXTURE_SCENARIO_VERSION = 'hacken-browser-port/0.5.0'
 // 0.22.0: the public generated suite records each test's intent, decodes known
 // PoolManager reverts, distinguishes zero-movement Swap events from exchanges,
 // and includes the direct existing-PoolId reinitialization observation.
-export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.22.0'
+// 0.23.0: every selector exposed by a completed report is collected into one
+// provenance-bearing catalog. Exact verified ABIs and canonical interfaces
+// outrank global Sourcify 4byte candidates in every UI surface.
+export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.23.0'
 
 /** Prevents a behavior report produced by older orchestration from masquerading as current. */
 export function reportMatchesCurrentPipeline(report: AnalysisReport, fixture: boolean) {

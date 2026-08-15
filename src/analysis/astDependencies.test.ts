@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import artifact from '../../out/DependencyFixtures.sol/DependencyFixtures.json'
+import artifact from '../fixtures/generated/dependency-fixtures-ast.json'
 
 /**
- * Exercised against a real solc 0.8.26 AST emitted by `forge build --ast`, not a
- * hand-written approximation. A dependency analysis tested only on ASTs shaped
- * by its own author proves the author's assumptions, not the compiler's output.
+ * Exercised against a checked-in real solc 0.8.26 AST emitted by
+ * `forge build --ast`, not a hand-written approximation. The native CI lane
+ * regenerates and diffs this fixture, while Vitest does not depend on Foundry's
+ * ignored `out/` directory or on CI job ordering.
  */
 // Evaluated from the exact file the worker loads with importScripts, rather
 // than a copy: the package is ESM, so a plain require() would resolve it as an
@@ -31,7 +32,7 @@ const { analyzeAstDependencies, SOURCE_KINDS, SINK_KINDS } = loadWorkerModule<{
 }>('../../public/astDependencies.js')
 
 const dependencies = analyzeAstDependencies([
-  { path: 'contracts/fixtures/DependencyFixtures.sol', node: artifact.ast },
+  { path: artifact.sourcePath, node: artifact.ast },
 ])
 
 function forFunction(name: string) {
@@ -44,6 +45,8 @@ function has(name: string, sink: string, source: string) {
 
 describe('AST dependency analysis on real solc output', () => {
   it('parsed a real AST', () => {
+    expect(artifact.compiler).toBe('0.8.26+commit.8a97fa7a')
+    expect(artifact.ast.absolutePath).toBe(artifact.sourcePath)
     expect(artifact.ast).toBeTruthy()
     expect(dependencies.length).toBeGreaterThan(0)
     expect(SOURCE_KINDS).toContain('msg.sender')

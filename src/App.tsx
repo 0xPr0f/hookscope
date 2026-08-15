@@ -15,6 +15,7 @@ import { ChainDropdown } from './components/ChainDropdown'
 import { HowItWorksPage, MethodologyPage } from './pages/InformationPages'
 import { informationPageForPath } from './pages/informationRoutes'
 import { RpcSettingsDialog } from './features/settings/RpcSettingsDialog'
+import { SelectorAwareText } from './features/selectors/SelectorDisplay'
 
 const ContractSourceWorkspace = lazy(() => import('./features/source/ContractSourceWorkspace').then((module) => ({ default: module.ContractSourceWorkspace })))
 
@@ -52,11 +53,11 @@ function PhaseRail({ report }: { report: AnalysisReport }) {
               ? <Check size={12} aria-hidden="true" />
               : phase.status === 'degraded' && phase.completed > 0
                 ? <Activity size={12} aria-hidden="true" />
-                : '—'}
+                : 'Not available'}
           </span>
           <div className="phase-copy">
             <b>{phase.label}</b>
-            {phase.detail && <small>{phase.detail}</small>}
+            {phase.detail && <small><SelectorAwareText lookup={report.selectorSignatures}>{phase.detail}</SelectorAwareText></small>}
           </div>
         </div>
       ))}
@@ -206,7 +207,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
             </section>
           </div>
           {report.limitations.length > 0 && (
-            <div className="limitations"><b>Coverage limitations</b>{report.limitations.map((item) => <p key={item}>{item}</p>)}</div>
+            <div className="limitations"><b>Coverage limitations</b>{report.limitations.map((item) => <p key={item}><SelectorAwareText lookup={report.selectorSignatures}>{item}</SelectorAwareText></p>)}</div>
           )}
           <div className="report-actions">
             <button className="secondary-button" onClick={onRunAgain}><RotateCcw size={14} /> Run analysis again</button>
@@ -229,7 +230,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
             <div><p className="eyebrow">Evidence ledger</p><h2>What the deployed mechanism can do</h2></div>
             <button className="text-button" onClick={() => downloadReport(report)}><Download size={14} /> Export JSON</button>
           </div>
-          <EvidenceLedger findings={report.findings} />
+          <EvidenceLedger findings={report.findings} selectorSignatures={report.selectorSignatures} />
         </div>
       )}
 
@@ -266,10 +267,10 @@ function App() {
     document.documentElement.dataset.theme = theme
     document.documentElement.style.colorScheme = theme
     document.title = informationPage === 'how'
-      ? 'How Hookscope works — Hookscope'
+      ? 'How Hookscope works | Hookscope'
       : informationPage === 'methodology'
-        ? 'Methodology — Hookscope'
-        : 'Hookscope — Uniswap v4 hook analyzer'
+        ? 'Methodology | Hookscope'
+        : 'Hookscope | Uniswap v4 hook analyzer'
   }, [informationPage, theme])
 
   const findPools = () => discover({ chainId, token })
@@ -323,7 +324,7 @@ function App() {
         <section className="hero">
           <p className="kicker"><Activity size={14} /> Uniswap v4 execution transparency</p>
           <h1>See what a hook actually does.</h1>
-          <p className="hero-copy">Enter a token. Hookscope finds its v4 pools, maps callback and control mechanics, and records the exact evidence behind every claim—inside your browser.</p>
+          <p className="hero-copy">Enter a token. Hookscope finds its v4 pools, maps callback and control mechanics, and records the exact evidence behind every claim inside your browser.</p>
 
           <form className="scan-form" onSubmit={(event) => { event.preventDefault(); findPools() }}>
             <label>

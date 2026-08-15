@@ -14,6 +14,7 @@ import { Check, Code2, Copy, ExternalLink, FileCode2, Search } from 'lucide-reac
 import type { AnalysisReport, ContractNode } from '../../domain/report'
 import { shortAddress } from '../../domain/address'
 import { AppDropdown } from '../../components/AppDropdown'
+import { SelectorCatalogList } from '../selectors/SelectorDisplay'
 import {
   fetchSourcifyCompilationBundle,
   type SourcifyCompilationBundle,
@@ -349,12 +350,20 @@ export function ContractSourceWorkspace({ report, theme = 'light' }: { report: A
       {tab === 'identities' ? (
         <div className="pool-list" role="tabpanel">
           {report.contractGraph.map((node) => (
-            <div className="pool-row" key={`${node.address}:${node.codeHash}`}>
-              <span><b>{node.role}</b> · {shortAddress(node.address)}</span>
-              <span>{node.sourceMetadata
-                ? `${node.sourceMetadata.contractName ?? 'Verified contract'} · ${node.sourceMetadata.compilerVersion ?? node.sourceMetadata.language ?? 'compiler recorded'}`
-                : 'Bytecode interface inferred'}</span>
-              <code>{node.selectors.length} selector{node.selectors.length === 1 ? '' : 's'}</code>
+            <div className="contract-identity-record" key={`${node.address}:${node.codeHash}`}>
+              <div className="pool-row">
+                <span><b>{node.role}</b> · {shortAddress(node.address)}</span>
+                <span>{node.sourceMetadata
+                  ? `${node.sourceMetadata.contractName ?? 'Verified contract'} · ${node.sourceMetadata.compilerVersion ?? node.sourceMetadata.language ?? 'compiler recorded'}`
+                  : 'Bytecode interface inferred'}</span>
+                <code>{node.selectors.length} selector{node.selectors.length === 1 ? '' : 's'}</code>
+              </div>
+              {node.selectors.length > 0 && (
+                <details className="contract-selector-details">
+                  <summary>View decoded interface</summary>
+                  <SelectorCatalogList selectors={node.selectors} lookup={report.selectorSignatures} subject={node.address} />
+                </details>
+              )}
             </div>
           ))}
         </div>

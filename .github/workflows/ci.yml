@@ -60,6 +60,10 @@ jobs:
       # inspector tests are not silently gated behind the fuzz feature.
       - run: pnpm test:rust
       - run: pnpm test:foundry
+      # Vitest consumes a checked-in real-solc AST so the browser lane never
+      # depends on Foundry's ignored `out/` directory. Regenerate it here,
+      # where forge is installed, and fail on compiler/source drift.
+      - run: pnpm fixtures:ast
       # The checked-in harness manifests are exactly what a browser injects into
       # a user's fork — both settlement lanes — so drift between them and the
       # pinned compiler build has to fail here rather than surface as a wrong

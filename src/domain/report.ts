@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { Address, Hex } from 'viem'
+import type { SelectorSignatureLookup } from './selectors'
 
 const severitySchema = z.enum(['critical', 'high', 'medium', 'low', 'info'])
 const evidenceClassSchema = z.enum([
@@ -12,6 +13,13 @@ const evidenceClassSchema = z.enum([
 
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/)
 const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/)
+
+const selectorSignatureCandidateSchema = z.object({
+  name: z.string().min(3).max(256),
+  source: z.enum(['verified-contract-abi', 'canonical-interface', 'sourcify-4byte']),
+  hasVerifiedContract: z.boolean(),
+  subjects: z.array(addressSchema).max(512).optional(),
+})
 
 const replayWitnessSchema = z.object({
   from: addressSchema,
@@ -149,6 +157,12 @@ export const analysisReportSchema = z.object({
     nextCursor: z.string().optional(),
   }),
   contractGraph: z.array(contractNodeSchema).max(512),
+  // Additive and defaulted so reports written before global selector labeling
+  // remain readable. Keys are four-byte function/custom-error selectors.
+  selectorSignatures: z.record(
+    z.string().regex(/^0x[0-9a-fA-F]{8}$/),
+    z.array(selectorSignatureCandidateSchema).max(16),
+  ).default({}),
   findings: z.array(evidenceSchema).max(5_000),
   phases: z.array(phaseSchema),
   scenarios: z.object({ completed: z.number().int(), total: z.number().int() }),
@@ -195,12 +209,13 @@ export type ContractNode = Omit<z.infer<typeof contractNodeSchema>, 'address' | 
   selectors: Hex[]
 }
 export type AnalysisPhase = z.infer<typeof phaseSchema>
-export type AnalysisReport = Omit<z.infer<typeof analysisReportSchema>, 'token' | 'blockHash' | 'pools' | 'findings' | 'contractGraph'> & {
+export type AnalysisReport = Omit<z.infer<typeof analysisReportSchema>, 'token' | 'blockHash' | 'pools' | 'findings' | 'contractGraph' | 'selectorSignatures'> & {
   token: Address
   blockHash: Hex
   pools: PoolDescriptor[]
   findings: Evidence[]
   contractGraph: ContractNode[]
+  selectorSignatures?: SelectorSignatureLookup
 }
 
 export type ReportSummary = Pick<

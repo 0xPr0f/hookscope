@@ -72,7 +72,7 @@ export type CustomRouterSample = {
 export const CUSTOM_ROUTER_SAMPLES: CustomRouterSample[] = [
   {
     id: 'owl-1',
-    label: 'OWL — One Way Liquidity',
+    label: 'OWL | One Way Liquidity',
     transactionHash: '0x3bc74bfb8faaaef19b0fe08f0bf4fe6bb5cf35959d0eccb1453d70e4a6871564',
     blockNumber: 25754415n,
     /** Parent block: the state a replay pins to. */
@@ -120,7 +120,7 @@ export const CUSTOM_ROUTER_SAMPLES: CustomRouterSample[] = [
   },
   {
     id: 'owl-2',
-    label: 'OWL — One Way Liquidity',
+    label: 'OWL | One Way Liquidity',
     transactionHash: '0xe8c2d9a49884b837ded357476196f5b64c633a32755585db543a8d82334302b0',
     blockNumber: 25754415n,
     /** Parent block: the state a replay pins to. */
@@ -154,7 +154,7 @@ export const CUSTOM_ROUTER_SAMPLES: CustomRouterSample[] = [
   },
   {
     id: 'hfa-1',
-    label: 'HFA — HardFloorAssets',
+    label: 'HFA | HardFloorAssets',
     transactionHash: '0xe1b5a03b7795bc7069feddb7910d7ff2e0bf0c7d1d849196152e3b3a8d68c5b3',
     blockNumber: 25740689n,
     /** Parent block: the state a replay pins to. */
