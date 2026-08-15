@@ -113,6 +113,7 @@ function VerifiedCodeExplorer({ chainId, node, theme }: { chainId: number; node:
     const line = view.state.doc.line(Math.min(Math.max(lineNumber, 1), view.state.doc.lines))
     view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true })
     view.focus()
+    setMobilePane('code')
   }
 
   const selectFile = (path: string) => {
