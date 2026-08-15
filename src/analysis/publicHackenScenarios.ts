@@ -3,6 +3,7 @@ import type { SelectorSignatureLookup } from '../data/signatureDatabase'
 import type { Evidence, PoolDescriptor } from '../domain/report'
 import { decodeHookPermissions, type HookPermission } from '../domain/hooks'
 import type { ProtocolScenarioOutcome } from './protocolScenarioRunner'
+import type { PublicHackenRuntimeProbe } from './publicHackenRuntime'
 import {
   decodeProtocolRevert,
   summarizeProtocolSwapMovement,
@@ -20,7 +21,11 @@ import {
  * is deliberately bounded to those executions; it is not a universal verdict.
  */
 
-export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.4.0'
+// 0.5.0 adds pinned runtime adapters for canonical hook getters, ERC-165,
+// permission-selected direct callback authorization, and compatible secondary
+// PoolKeys. Older reports classified those six conditional cases without
+// executing them, so they are not semantically equivalent.
+export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.5.0'
 export const PUBLIC_HACKEN_UPSTREAM_COMMIT = '965be6006eab54ff65b83285ef40a245c8735149'
 
 export type PublicHackenClassification = 'portable' | 'conditional' | 'fixture-only'
@@ -40,7 +45,7 @@ type ScenarioRequirement = {
 type PublicCondition =
   | { kind: 'hook-permissions'; all?: HookPermission[]; any?: HookPermission[] }
   | { kind: 'dynamic-fee' }
-  | { kind: 'not-implemented'; reason: string }
+  | { kind: 'runtime-probe'; reason: string }
 
 export type PublicHackenCaseDefinition = {
   id: string
@@ -82,17 +87,17 @@ export const PUBLIC_HACKEN_CASES: readonly PublicHackenCaseDefinition[] = [
   { id: 'donate-sequential', upstream: 'DonateSuite.run_Donate_Multiple', section: 'donate', description: 'Three sequential donations', classification: 'portable', requirements: [exact('sequence:three-donations')] },
   { id: 'donate-bounded-corpus', upstream: 'FuzzTestEntry.test_Fuzz_Donate_Amounts', section: 'donate', description: 'Bounded donation amount corpus', classification: 'portable', requirements: [exact('donate:minimal'), exact('donate:currency0'), exact('donate:currency1'), exact('donate:both')] },
   { id: 'reinitialize', upstream: 'InitializeSuite.run_Reinitialize_Reverts', section: 'initialize', description: 'A second initialize call must revert', classification: 'portable', requirements: [exact('initialize:reinitialize')], expectation: { kind: 'must-revert', expectedError: 'PoolAlreadyInitialized' } },
-  { id: 'only-pool-manager', upstream: 'HookAuthorization.run_Auth_OnlyPoolManager_OnEntrypoints', section: 'authorization', description: 'Direct non-PoolManager callback is rejected', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires a permission-selected callback and an isolated direct-call authorization probe.' } },
+  { id: 'only-pool-manager', upstream: 'HookAuthorization.run_Auth_OnlyPoolManager_OnEntrypoints', section: 'authorization', description: 'Direct non-PoolManager callback is rejected', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires permission-selected direct callback executions in the pinned fork session.' } },
   { id: 'config-only-pool-manager', upstream: 'HookConfiguration.run_Config_OnlyPoolManagerGuard', section: 'configuration', description: 'Configuration guard rejects a direct callback', classification: 'fixture-only', requirements: [], reason: 'Depends on the fixture hook’s bespoke configuration policy.' },
-  { id: 'secondary-pool-open-policy', upstream: 'HookAuthorization.run_Auth_ObserveSecondaryPool_OpenPolicy', section: 'authorization', description: 'Open pool policy accepts a second initialized PoolId', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires a second initialized pool using the same deployed hook and independently verified compatible currencies.' } },
+  { id: 'secondary-pool-open-policy', upstream: 'HookAuthorization.run_Auth_ObserveSecondaryPool_OpenPolicy', section: 'authorization', description: 'Open pool policy accepts a second initialized PoolId', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires a second discovered PoolId using the same deployed hook and currency pair.' } },
   { id: 'secondary-pool-restricted-policy', upstream: 'HookAuthorization.run_Auth_Rejects_UntrustedPoolKey', section: 'authorization', description: 'Restricted pool policy rejects a second PoolId', classification: 'fixture-only', requirements: [], reason: 'Depends on the fixture hook’s configurePoolPolicy mutator.' },
   { id: 'external-mutator-open-policy', upstream: 'HookAuthorization.run_Auth_ObserveOpenExternalMutator', section: 'authorization', description: 'Open configuration policy permits a second caller', classification: 'fixture-only', requirements: [], reason: 'Depends on the fixture hook’s configureRouter mutator.' },
   { id: 'external-mutator-restricted-policy', upstream: 'HookAuthorization.run_Auth_NoOpenExternalMutators', section: 'authorization', description: 'Restricted configuration policy rejects a second caller', classification: 'fixture-only', requirements: [], reason: 'Depends on the fixture hook’s configurePolicy and configureRouter mutators.' },
   { id: 'router-policy-pair', upstream: 'HookAuthorization.run_Auth_RouterPolicyPair', section: 'authorization', description: 'Open and selected-router operation paths', classification: 'fixture-only', requirements: [], reason: 'Depends on the fixture hook’s configurable router policy.' },
-  { id: 'permissions-match-address', upstream: 'HookConfiguration.run_PermissionsMatchAddressFlags_ifExposed', section: 'configuration', description: 'Exposed permissions match hook address flags', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires a proven getHookPermissions-compatible interface before comparing returned booleans with address flags.' } },
-  { id: 'introspect-public-getters', upstream: 'HookIntrospectionSuite.run_Introspect_PublicGetters', section: 'configuration', description: 'PoolManager and permission getters are callable', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires verified or bytecode-inferred getter interfaces and return-shape validation.' } },
-  { id: 'introspect-optional-interface', upstream: 'HookIntrospectionSuite.run_Introspect_OptionalInterfaces', section: 'configuration', description: 'ERC-165 interface response is observed', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires a proven supportsInterface(bytes4) entrypoint; absence is not a hook failure.' } },
-  { id: 'base-hook-pool-manager', upstream: 'HookConfiguration.run_Config_BaseHookInheritanceHint', section: 'configuration', description: 'Exposed PoolManager identity matches the deployed manager', classification: 'conditional', requirements: [], condition: { kind: 'not-implemented', reason: 'Requires a proven poolManager() getter and decoded address return value.' } },
+  { id: 'permissions-match-address', upstream: 'HookConfiguration.run_PermissionsMatchAddressFlags_ifExposed', section: 'configuration', description: 'Exposed permissions match hook address flags', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires a canonical 14-boolean getHookPermissions() result at the pinned block.' } },
+  { id: 'introspect-public-getters', upstream: 'HookIntrospectionSuite.run_Introspect_PublicGetters', section: 'configuration', description: 'PoolManager and permission getters are callable', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires canonical getHookPermissions() and poolManager() results at the pinned block.' } },
+  { id: 'introspect-optional-interface', upstream: 'HookIntrospectionSuite.run_Introspect_OptionalInterfaces', section: 'configuration', description: 'ERC-165 interface response is observed', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires a canonical supportsInterface(bytes4) boolean result; absence is not a hook failure.' } },
+  { id: 'base-hook-pool-manager', upstream: 'HookConfiguration.run_Config_BaseHookInheritanceHint', section: 'configuration', description: 'Exposed PoolManager identity matches the deployed manager', classification: 'conditional', requirements: [], condition: { kind: 'runtime-probe', reason: 'Requires a canonical poolManager() address result at the pinned block.' } },
   { id: 'selector-through-manager', upstream: 'HookConfiguration.run_Config_ReturnsOwnSelector_WhenCalledByManager', section: 'configuration', description: 'PoolManager accepts the hook callback selector', classification: 'portable', requirements: [exact('swap:exact-input:0-for-1:small')], expectation: { kind: 'must-complete', requireNonZeroSwap: true }, condition: { kind: 'hook-permissions', any: ['beforeSwap', 'afterSwap'] } },
   { id: 'swap-return-delta-signature', upstream: 'HookConfiguration.run_SwapReturnDelta_SignatureChecks', section: 'configuration', description: 'PoolManager decodes enabled swap return-delta tuple shapes', classification: 'conditional', requirements: [exact('swap:exact-input:0-for-1:small')], expectation: { kind: 'must-complete', requireNonZeroSwap: true }, condition: { kind: 'hook-permissions', any: ['beforeSwapReturnDelta', 'afterSwapReturnDelta'] } },
   { id: 'swap-non-zero-return-deltas', upstream: 'SwapDeltaEffects.run_NonZeroReturnDeltas', section: 'delta', description: 'PoolManager settles configured non-zero swap hook deltas', classification: 'fixture-only', requirements: [], reason: 'The upstream case forces values through the fixture-only configureReturnDeltas mutator.' },
@@ -121,6 +126,7 @@ export type PublicHackenCaseResult = {
   revertDiagnostics?: ProtocolRevertDiagnostic[]
   swapMovement?: ProtocolSwapMovement
   reason?: string
+  probeDetails?: Record<string, unknown>
 }
 
 function matches(pattern: string, scenarioId: string) {
@@ -132,7 +138,7 @@ function matches(pattern: string, scenarioId: string) {
 function conditionReason(definition: PublicHackenCaseDefinition, pool: PoolDescriptor) {
   const condition = definition.condition
   if (!condition) return undefined
-  if (condition.kind === 'not-implemented') return condition.reason
+  if (condition.kind === 'runtime-probe') return `The pinned runtime adaptation was unavailable. ${condition.reason}`
   if (condition.kind === 'dynamic-fee') {
     return pool.fee === 0x80_0000
       ? undefined
@@ -168,6 +174,7 @@ function evaluateCase(input: {
   definition: PublicHackenCaseDefinition
   pool: PoolDescriptor
   outcomes: ProtocolScenarioOutcome[]
+  runtimeProbes?: PublicHackenRuntimeProbe[]
   poolManager?: Address
   selectorSignatures?: SelectorSignatureLookup
 }): PublicHackenCaseResult {
@@ -187,6 +194,21 @@ function evaluateCase(input: {
 
   if (definition.classification === 'fixture-only') {
     return { ...base, status: 'not-applicable', reason: definition.reason ?? 'This case depends on the deterministic fixture contract.' }
+  }
+
+  const runtimeProbe = input.runtimeProbes?.find((probe) =>
+    probe.caseId === definition.id
+    && probe.poolId.toLowerCase() === pool.poolId.toLowerCase())
+  if (runtimeProbe) {
+    return {
+      ...base,
+      status: runtimeProbe.status,
+      reason: runtimeProbe.reason,
+      gasUsed: runtimeProbe.gasUsed,
+      scenarioIds: runtimeProbe.scenarioIds ?? [],
+      observedOutcome: runtimeProbe.observedOutcome,
+      probeDetails: runtimeProbe.details,
+    }
   }
 
   const unavailableReason = conditionReason(definition, pool)
@@ -345,6 +367,7 @@ function evaluateCase(input: {
 export function evaluatePublicHackenCases(input: {
   pools: PoolDescriptor[]
   outcomes: ProtocolScenarioOutcome[]
+  runtimeProbes?: PublicHackenRuntimeProbe[]
   poolManager?: Address
   selectorSignatures?: SelectorSignatureLookup
 }) {
@@ -353,6 +376,7 @@ export function evaluatePublicHackenCases(input: {
       definition,
       pool,
       outcomes: input.outcomes,
+      runtimeProbes: input.runtimeProbes,
       poolManager: input.poolManager,
       selectorSignatures: input.selectorSignatures,
     })))
@@ -362,11 +386,13 @@ export function publicHackenSuiteEvidence(input: {
   poolManager: Address
   pools: PoolDescriptor[]
   outcomes: ProtocolScenarioOutcome[]
+  runtimeProbes?: PublicHackenRuntimeProbe[]
   selectorSignatures?: SelectorSignatureLookup
 }): Evidence {
   const cases = evaluatePublicHackenCases({
     pools: input.pools,
     outcomes: input.outcomes,
+    runtimeProbes: input.runtimeProbes,
     poolManager: input.poolManager,
     selectorSignatures: input.selectorSignatures,
   })
@@ -378,20 +404,25 @@ export function publicHackenSuiteEvidence(input: {
   const unavailable = publicCases.filter((item) => item.status === 'unavailable').length
   const errors = publicCases.filter((item) => item.status === 'error').length
   const fixtureOnly = cases.filter((item) => item.classification === 'fixture-only').length
-  const executionCount = input.outcomes.filter((outcome) =>
+  const generatedExecutionCount = input.outcomes.filter((outcome) =>
     outcome.status === 'completed' || outcome.status === 'reverted').length
+  const runtimeExecutionCount = new Set(
+    (input.runtimeProbes ?? []).flatMap((probe) =>
+      (probe.scenarioIds ?? []).map((scenarioId) => `${probe.poolId.toLowerCase()}:${scenarioId}`)),
+  ).size
+  const executionCount = generatedExecutionCount + runtimeExecutionCount
   return {
     id: 'hacken-public-pool-suite',
     detectorId: 'hacken-public-pool-suite',
-    detectorVersion: '0.4.0',
+    detectorVersion: '0.5.0',
     severity: failed ? 'medium' : warnings ? 'low' : 'info',
-    evidenceClass: 'deterministic-fact',
+    evidenceClass: 'concrete-observation',
     subject: input.poolManager,
     title: 'Hacken-derived public-pool assertion suite',
-    claim: `${passed} bounded expectations were compatible, ${warnings} produced mixed or differently explained behavior, ${failed} were contradicted, and ${observed} observation-only cases were recorded using pinned generated PoolManager executions. ${unavailable} cases were unavailable and ${errors} encountered analyzer errors. ${fixtureOnly} fixture-specific cases were classified but excluded. One generated execution may satisfy more than one upstream expectation, so these case results are assertions over shared execution evidence rather than additional transactions or a universal hook verdict.`,
+    claim: `${passed} bounded expectations were compatible, ${warnings} produced mixed or differently explained behavior, ${failed} were contradicted, and ${observed} observation-only cases were recorded using pinned generated PoolManager executions and strict hook-runtime probes. ${unavailable} cases were unavailable and ${errors} encountered analyzer errors. ${fixtureOnly} fixture-specific cases were classified but excluded. One generated execution may satisfy more than one upstream expectation, so these case results are assertions over shared execution evidence rather than additional transactions or a universal hook verdict.`,
     confidence: 'confirmed',
     affectedPools: input.pools.map((pool) => pool.poolId).slice(0, 20),
-    reproducibility: 'not-applicable',
+    reproducibility: 'replayed',
     technical: {
       executionSource: 'protocol-native-generated',
       version: PUBLIC_HACKEN_VERSION,
@@ -406,6 +437,9 @@ export function publicHackenSuiteEvidence(input: {
       errors,
       fixtureOnly,
       executionCount,
+      generatedExecutionCount,
+      runtimeExecutionCount,
+      runtimeProbeCount: input.runtimeProbes?.length ?? 0,
       cases,
     },
   }

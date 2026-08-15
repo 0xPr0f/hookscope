@@ -2,10 +2,10 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import type postgres from 'postgres'
 import { randomUUID } from 'node:crypto'
 import { getAddress, isAddress } from 'viem'
-import { analysisReportSchema } from '../../src/domain/report'
-import { canonicalReportHash } from '../_lib/canonical'
-import { database } from '../_lib/database'
-import { allowMethods, bodyBytes, requestIp, submissionAllowed } from '../_lib/http'
+import { analysisReportSchema } from '../../src/domain/report.js'
+import { canonicalReportHash } from '../_lib/canonical.js'
+import { database } from '../_lib/database.js'
+import { allowMethods, bodyBytes, requestIp, submissionAllowed } from '../_lib/http.js'
 
 const MAX_REPORT_BYTES = 2_000_000
 

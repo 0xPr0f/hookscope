@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Address, Hex } from 'viem'
-import type { SelectorSignatureLookup } from './selectors'
+import type { SelectorSignatureLookup } from './selectors.js'
 
 const severitySchema = z.enum(['critical', 'high', 'medium', 'low', 'info'])
 const evidenceClassSchema = z.enum([

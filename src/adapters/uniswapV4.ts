@@ -72,6 +72,25 @@ async function readChunk(
   })
 }
 
+function errorMessages(error: unknown) {
+  const messages: string[] = []
+  for (let current = error, depth = 0; current && depth < 8; depth += 1) {
+    const node = current as { message?: unknown; details?: unknown; cause?: unknown }
+    if (typeof node.message === 'string') messages.push(node.message)
+    if (typeof node.details === 'string') messages.push(node.details)
+    current = node.cause
+  }
+  return messages.join(' ')
+}
+
+/** Read a provider-advertised `eth_getLogs` block ceiling when it supplies one. */
+export function suggestedLogRange(error: unknown): bigint | undefined {
+  const match = errorMessages(error).match(/limited\s+to\s+\d+\s*-\s*(\d+)\s+blocks?/iu)
+  if (!match?.[1]) return undefined
+  const ceiling = BigInt(match[1])
+  return ceiling > 0n ? ceiling : undefined
+}
+
 async function scanLogRange(input: {
   client: PublicClient
   poolManager: Address
@@ -99,8 +118,13 @@ async function scanLogRange(input: {
       if (!learnedCeiling && chunk < 1_000_000n) chunk *= 2n
     } catch (error) {
       if (signal?.aborted) throw error
-      if (chunk <= 2_000n) throw error
-      chunk /= 2n
+      const advertised = suggestedLogRange(error)
+      if (advertised !== undefined && advertised < chunk) {
+        chunk = advertised
+      } else {
+        if (chunk <= 1n) throw error
+        chunk = chunk / 2n || 1n
+      }
       learnedCeiling = true
     }
   }

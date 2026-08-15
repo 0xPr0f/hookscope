@@ -201,6 +201,34 @@ describe('scenario console transcript', () => {
     })
   })
 
+  it('describes observed runtime introspection without pretending it emitted a PoolManager event', () => {
+    const suites = buildScenarioConsoleSuites(report([
+      finding({
+        id: 'hacken-public-pool-suite', detectorId: 'hacken-public-pool-suite',
+        technical: {
+          executionCount: 1,
+          cases: [{
+            poolId: `0x${'ab'.repeat(32)}`,
+            id: 'introspect-optional-interface',
+            upstream: 'HookIntrospectionSuite.run_Introspect_OptionalInterfaces',
+            section: 'configuration',
+            description: 'ERC-165 interface response is observed',
+            classification: 'conditional',
+            status: 'observed',
+            observedOutcome: 'completed',
+            expectation: 'Record the pinned outcome.',
+            reason: 'supportsInterface(0x01ffc9a7) returned false; this is recorded without requiring ERC-165 support.',
+            scenarioIds: ['runtime:supportsInterface:01ffc9a7'],
+          }],
+        },
+      }),
+    ]))
+    const line = suite(suites, 'hacken-public').lines[0]
+    expect(line).toMatchObject({ status: 'OBSERVED', executions: 1 })
+    expect(line?.detail).toContain('returned false')
+    expect(line?.detail).not.toContain('PoolManager event')
+  })
+
   it('renders generated scenarios as their own suite, reverts included', () => {
     const suites = buildScenarioConsoleSuites(report([
       finding({

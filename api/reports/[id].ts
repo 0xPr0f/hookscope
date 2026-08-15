@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { database } from '../_lib/database'
-import { allowMethods } from '../_lib/http'
+import { database } from '../_lib/database.js'
+import { allowMethods } from '../_lib/http.js'
 
 const idSchema = z.string().uuid()
 

@@ -89,10 +89,14 @@ function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
     const movement = movementResult(item.swapMovement)
     const diagnostics = diagnosticSummaries(item.revertDiagnostics)
     const executionCount = Array.isArray(item.scenarioIds) ? item.scenarioIds.length : 0
+    const isRuntimeProbe = Array.isArray(item.scenarioIds)
+      && item.scenarioIds.some((scenarioId) => typeof scenarioId === 'string' && scenarioId.startsWith('runtime:'))
     const expectation = stringValue(item.expectation)
     const reason = stringValue(item.reason)
     const observationDetail = status === 'observed'
-      ? observedOutcome === 'no-movement' && movement
+      ? isRuntimeProbe
+        ? reason ?? `${executionCount} strict runtime probe${executionCount === 1 ? '' : 's'} completed at the pinned block.`
+      : observedOutcome === 'no-movement' && movement
         ? `${movement.events} Swap event${movement.events === 1 ? '' : 's'} emitted, but every amount0/amount1 delta was zero. No currency exchange was observed.`
         : observedOutcome === 'reverted'
           ? diagnostics.join(' · ') || `${executionCount} pinned execution${executionCount === 1 ? '' : 's'} reached the PoolManager and reverted.`
@@ -130,7 +134,7 @@ function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
   return {
     id: 'hacken-public',
     name: 'HackenPublicPoolAssertions',
-    description: 'Evaluates portable and proven conditional Hacken expectations against pinned executions on the selected deployed PoolManager and hook.',
+    description: 'Evaluates portable and proven conditional Hacken expectations using pinned PoolManager executions plus strict runtime introspection and direct-call adapters.',
     version: stringValue(report.engineVersions.hackenPublicPort)
       ?? stringValue(manifest?.technical?.version)
       ?? 'not-run',

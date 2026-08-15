@@ -72,6 +72,26 @@ export function isEndpointCapabilityError(error: Error): boolean {
   return RETRY_ON_NEXT_ENDPOINT.some((needle) => message.includes(needle))
 }
 
+/**
+ * Public endpoints can expose different method tiers behind the same URL.
+ * Ethereum dRPC and PublicNode currently answer ordinary reads but reject
+ * archive `eth_getLogs`; leaving them eligible makes every adaptive log chunk
+ * produce a known failed HTTP request before the usable fallback is tried.
+ */
+export function rpcMethodsForEndpoint(chainId: number, url: string) {
+  if (chainId !== 1) return undefined
+  let hostname: string
+  try {
+    hostname = new URL(url).hostname.toLowerCase()
+  } catch {
+    return undefined
+  }
+  if (hostname === 'ethereum.drpc.org' || hostname === 'ethereum-rpc.publicnode.com') {
+    return { exclude: ['eth_getLogs'] }
+  }
+  return undefined
+}
+
 export function toViemChain(config: ChainConfig): Chain {
   return {
     id: config.id,
@@ -98,6 +118,7 @@ export function getPublicClient(config: ChainConfig): PublicClient {
       rpcUrls.map((url) => http(url, {
         timeout: 15_000,
         retryCount: 1,
+        methods: rpcMethodsForEndpoint(config.id, url),
         // Account hydration asks for balance, nonce, and code together. JSON-RPC
         // batching turns those concurrent reads into one HTTP request, reducing
         // browser connection pressure without changing the pinned read model.

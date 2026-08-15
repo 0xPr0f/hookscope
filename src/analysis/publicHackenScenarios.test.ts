@@ -125,6 +125,42 @@ describe('public Hacken scenario adaptation', () => {
     expect(result?.reason).toContain('does not advertise')
   })
 
+  it('uses pinned runtime adaptations for conditional cases that have no generated-scenario requirement', () => {
+    const results = evaluatePublicHackenCases({
+      pools: [pool],
+      outcomes: completedOutcomes(),
+      runtimeProbes: [
+        {
+          caseId: 'permissions-match-address',
+          poolId: pool.poolId,
+          hook: pool.hook,
+          status: 'passed',
+          reason: 'canonical getter matched',
+          gasUsed: 24_000,
+          details: { returnedPermissions: ['beforeSwap'] },
+        },
+        {
+          caseId: 'only-pool-manager',
+          poolId: pool.poolId,
+          hook: pool.hook,
+          status: 'failed',
+          reason: 'one direct callback completed',
+          observedOutcome: 'completed',
+        },
+      ],
+    })
+    const byId = new Map(results.map((item) => [item.id, item]))
+    expect(byId.get('permissions-match-address')).toMatchObject({
+      status: 'passed',
+      gasUsed: 24_000,
+      probeDetails: { returnedPermissions: ['beforeSwap'] },
+    })
+    expect(byId.get('only-pool-manager')).toMatchObject({
+      status: 'failed',
+      observedOutcome: 'completed',
+    })
+  })
+
   it('turns a failed required execution into an adapter error, never hook behavior', () => {
     const outcomes = completedOutcomes().map((outcome) => outcome.scenarioId === 'sequence:alternating-swaps'
       ? { ...outcome, status: 'failed' as const, reason: 'worker terminated' }

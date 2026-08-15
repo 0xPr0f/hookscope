@@ -61,6 +61,12 @@ for (const path of apiSourceFiles) {
     !/(?:src\/analysis|src\/workers|src\/wasm|\.wasm)/u.test(source),
     `${relative(root, path)} pulls an analysis engine or Wasm artifact into the storage-only server boundary.`,
   )
+  for (const match of path.endsWith('.test.ts') ? [] : source.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/gu)) {
+    check(
+      match[1].endsWith('.js'),
+      `${relative(root, path)} uses extensionless ESM import ${match[1]}; Vercel emits .js files and Node cannot resolve that specifier.`,
+    )
+  }
 }
 
 check(existsSync(join(root, 'api/reports/index.ts')), 'The report collection endpoint is missing.')

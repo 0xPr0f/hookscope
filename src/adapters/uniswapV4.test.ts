@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Address, Hex, PublicClient } from 'viem'
 import type { ChainConfig } from '../config/chains'
 import type { PoolDescriptor } from '../domain/report'
-import { attachInitializationTransactions, computePoolId, computePoolStateSlot, discoverPools } from './uniswapV4'
+import { attachInitializationTransactions, computePoolId, computePoolStateSlot, discoverPools, suggestedLogRange } from './uniswapV4'
 
 const TOKEN = '0x1111111111111111111111111111111111111111' as Address
 const POOL_MANAGER = '0x2222222222222222222222222222222222222222' as Address
@@ -161,6 +161,38 @@ describe('Uniswap v4 index-first discovery', () => {
     expect(result.completeHistory).toBe(true)
     expect(result.pools).toHaveLength(1)
     expect(result.pools[0]?.poolId).toBe(fallbackPool.poolId)
+  })
+
+  it('adapts to a provider-advertised 50-block log ceiling', async () => {
+    const ranges: [bigint, bigint][] = []
+    const client = {
+      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+        ranges.push([fromBlock, toBlock])
+        if (toBlock - fromBlock + 1n > 50n) {
+          throw new Error('eth_getLogs is limited to 0 - 50 blocks range')
+        }
+        return []
+      },
+    } as unknown as PublicClient
+
+    const result = await discoverPools(
+      client,
+      chain(),
+      TOKEN,
+      220n,
+      undefined,
+      async () => new Response(null, { status: 404 }),
+    )
+
+    expect(result.completeHistory).toBe(true)
+    expect(ranges.some(([from, to]) => to - from + 1n === 50n)).toBe(true)
+    expect(ranges.filter(([from, to]) => to - from + 1n <= 50n).every(([from, to]) => to - from + 1n <= 50n)).toBe(true)
+  })
+
+  it('extracts an explicit provider log ceiling from nested RPC errors', () => {
+    const error = new Error('RPC request failed')
+    error.cause = new Error('eth_getLogs is limited to 0 - 50 blocks range')
+    expect(suggestedLogRange(error)).toBe(50n)
   })
 })
 

@@ -17,6 +17,7 @@ import {
 } from './behaviorComparators'
 import { claimBalanceSlot } from './protocolScenarioState'
 import { publicHackenSuiteEvidence, PUBLIC_HACKEN_VERSION } from './publicHackenScenarios'
+import { runPublicHackenRuntimeProbes, type PublicHackenRuntimeProbe } from './publicHackenRuntime'
 import { decodeProtocolRevert, summarizeProtocolSwapMovement, unresolvedProtocolRevertSelectors } from './protocolScenarioDiagnostics'
 
 /**
@@ -31,7 +32,10 @@ import { decodeProtocolRevert, summarizeProtocolSwapMovement, unresolvedProtocol
 // 0.10.0: unresolved revert selectors are batch-resolved through Sourcify's
 // filtered 4byte database and remain explicitly labelled as collision-prone
 // candidates rather than target-ABI facts.
-export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.10.0'
+// 0.11.0: the same hydrated fork session now runs canonical hook getter,
+// direct-callback authorization, ERC-165, and compatible secondary-PoolId
+// adaptations for the public Hacken catalogue.
+export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.11.0'
 
 /** EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks. */
 const SCENARIO_GAS_LIMIT = 16_000_000n
@@ -382,6 +386,7 @@ export async function runProtocolScenarios(input: {
   const findings: Evidence[] = []
   const deferredFindings: Evidence[] = []
   const contexts: ProtocolScenarioContext[] = []
+  const publicHackenRuntimeProbes: PublicHackenRuntimeProbe[] = []
   const limitations: string[] = []
   let hydrationReads = 0
   let executedPools = 0
@@ -662,6 +667,17 @@ export async function runProtocolScenarios(input: {
       // a difference is attributable to that variable rather than to context in
       // general.
       findings.push(...callerDependenceFindings({ context, probeProofs }))
+
+      // Reuse this pool's hydrated session for public-hook introspection and
+      // authorization probes. This keeps these adaptations pinned to the exact
+      // same block and avoids a second burst of account/code/storage RPC reads.
+      publicHackenRuntimeProbes.push(...await runPublicHackenRuntimeProbes({
+        session,
+        context,
+        pools: input.pools,
+        signal: input.signal,
+        maxHydrationRequests: input.maxHydrationRequests,
+      }))
       executedPools++
     } finally {
       hydrationReads += session.metrics().rpcReads
@@ -673,6 +689,8 @@ export async function runProtocolScenarios(input: {
   const behaviorReverts = outcomes.filter((outcome) =>
     outcome.status === 'reverted' && outcome.scenarioId !== 'initialize:reinitialize').length
   const failed = outcomes.filter((outcome) => outcome.status === 'failed').length
+  const runtimeProbeErrors = publicHackenRuntimeProbes.filter((probe) => probe.status === 'error').length
+  const runtimeProbeUnavailable = publicHackenRuntimeProbes.filter((probe) => probe.status === 'unavailable').length
   const capped = Math.max(0, hookedPools.length - selected.length)
 
   if (capped) limitations.push(`${capped} hooked pool${capped === 1 ? ' was' : 's were'} not covered by generated scenarios because the phase is bounded per scan.`)
@@ -680,6 +698,12 @@ export async function runProtocolScenarios(input: {
   if (behaviorReverts) limitations.push(`${behaviorReverts} generated scenario${behaviorReverts === 1 ? '' : 's'} reverted; a revert reached by the PoolManager is an observation about the pool, not an analyzer failure.`)
   if (outcomes.some((outcome) => outcome.status === 'unavailable')) {
     limitations.push('Some generated scenarios were unavailable at the pinned block; each records its own reason.')
+  }
+  if (runtimeProbeErrors) {
+    limitations.push(`${runtimeProbeErrors} public-hook runtime adaptation${runtimeProbeErrors === 1 ? '' : 's'} encountered an analyzer or execution error; each case records its own reason.`)
+  }
+  if (runtimeProbeUnavailable) {
+    limitations.push(`${runtimeProbeUnavailable} conditional public-hook adaptation${runtimeProbeUnavailable === 1 ? ' was' : 's were'} unavailable because the deployed hook or discovered pool batch did not prove the required interface or prerequisite.`)
   }
   if (completedScenarios) {
     limitations.push('Generated scenarios settle exclusively in ERC-6909 claims, so they exercise pool, hook, callback, and settlement behavior rather than the token\'s ordinary ERC-20 transfer path.')
@@ -701,7 +725,7 @@ export async function runProtocolScenarios(input: {
   }
 
   return {
-    status: executedPools === hookedPools.length && failed === 0 && executedPools > 0 ? 'passed' : 'degraded',
+    status: executedPools === hookedPools.length && failed === 0 && runtimeProbeErrors === 0 && executedPools > 0 ? 'passed' : 'degraded',
     version: PROTOCOL_SCENARIO_VERSION,
     publicHackenVersion: PUBLIC_HACKEN_VERSION,
     eligiblePools: hookedPools.length,
@@ -724,6 +748,7 @@ export async function runProtocolScenarios(input: {
         poolManager: getAddress(input.poolManager),
         pools: selected,
         outcomes,
+        runtimeProbes: publicHackenRuntimeProbes,
         selectorSignatures,
       }),
     ],

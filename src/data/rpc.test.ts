@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isEndpointCapabilityError, toViemChain } from './rpc'
+import { isEndpointCapabilityError, rpcMethodsForEndpoint, toViemChain } from './rpc'
 import { CHAINS, getChainConfig } from '../config/chains'
 
 describe('RPC endpoint failover', () => {
@@ -60,6 +60,13 @@ describe('RPC endpoint failover', () => {
       if (!chain.deepExecution) continue
       expect(chain.rpcUrls.length, chain.slug).toBeGreaterThan(1)
     }
+  })
+
+  it('does not send Ethereum archive-log reads to public endpoints that reject that method', () => {
+    expect(rpcMethodsForEndpoint(1, 'https://ethereum.drpc.org')).toEqual({ exclude: ['eth_getLogs'] })
+    expect(rpcMethodsForEndpoint(1, 'https://ethereum-rpc.publicnode.com')).toEqual({ exclude: ['eth_getLogs'] })
+    expect(rpcMethodsForEndpoint(1, 'https://public.1rpc.io/eth')).toBeUndefined()
+    expect(rpcMethodsForEndpoint(10, 'https://ethereum.drpc.org')).toBeUndefined()
   })
 
   it('leads with an archive-verified endpoint on the chains cleared for deep execution', () => {

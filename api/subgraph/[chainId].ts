@@ -4,8 +4,8 @@ import {
   GRAPH_GATEWAY_ORIGIN,
   UNISWAP_V4_SUBGRAPHS,
   subgraphQuery,
-} from '../../src/config/subgraphs'
-import { allowMethods, discoveryAllowed, requestIp } from '../_lib/http'
+} from '../../src/config/subgraphs.js'
+import { allowMethods, discoveryAllowed, requestIp } from '../_lib/http.js'
 
 /**
  * Pool-discovery proxy that keeps the Graph Network key server-side.

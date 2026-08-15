@@ -2,6 +2,23 @@ import { expect, test } from '@playwright/test'
 
 const malformedAddress = `0x${'a'.repeat(41)}`
 
+test('persists the selected color theme across reloads and routes', async ({ page }) => {
+  await page.goto('/')
+  const toggle = page.getByRole('button', { name: /Switch to (light|dark) mode/ })
+  const initialTheme = await page.locator('html').getAttribute('data-theme')
+  const selectedTheme = initialTheme === 'dark' ? 'light' : 'dark'
+
+  await toggle.click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', selectedTheme)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('hookscope.theme.v1'))).toBe(selectedTheme)
+
+  await page.reload()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', selectedTheme)
+  await page.goto('/methodology')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', selectedTheme)
+  await expect(page.getByRole('heading', { name: 'Claims are only as strong as their evidence.' })).toBeVisible()
+})
+
 test('runs the deterministic browser engines and records bounded outcomes', async ({ page }) => {
   // The three browser projects run their 30k-input workers concurrently in CI;
   // slower shared runners can legitimately take longer than one worker's

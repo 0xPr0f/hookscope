@@ -19,6 +19,9 @@ import { buildProtocolScenarioMatrix } from './protocolNativeScenarios'
 import { deriveScenarioMutationMask, isScenarioDerivative } from './protocolScenarioMask'
 import { selectExplorationSeeds } from './protocolScenarioExploration'
 import { runErc20RoundTrip } from './erc20RoundTrip'
+import { runPublicHackenRuntimeProbes } from './publicHackenRuntime'
+import type { PoolDescriptor } from '../domain/report'
+import type { ProtocolScenarioContext } from './protocolScenarioContext'
 
 /**
  * Proves the generated-scenario path end to end in the real browser engine.
@@ -294,6 +297,61 @@ describe('generated PoolManager scenarios in browser revm', () => {
     expect(step.proof.calls.some((call: RevmCallEvidence) =>
       call.target.toLowerCase() === HACKEN_FIXTURE_CONTEXT.poolManager.toLowerCase()
       && call.selector === '0x6276cbbe')).toBe(true)
+  })
+
+  it('runs strict public-hook runtime adaptations in the browser engine', async () => {
+    ready()
+    const allowed = HACKEN_FIXTURE_CONTEXT.swapRouter
+    const { snapshot, overlay } = snapshotWithHarness(allowed)
+    const session = directForkSession('public-hacken-runtime-adapters', snapshot)
+    const primary: PoolDescriptor = {
+      poolId: HACKEN_FIXTURE_CONTEXT.poolId,
+      currency0: HACKEN_FIXTURE_CONTEXT.currency0,
+      currency1: HACKEN_FIXTURE_CONTEXT.currency1,
+      fee: HACKEN_FIXTURE_CONTEXT.fee,
+      tickSpacing: HACKEN_FIXTURE_CONTEXT.tickSpacing,
+      hook: HACKEN_FIXTURE_CONTEXT.hook,
+      initializedAtBlock: '1',
+      activity: 2,
+    }
+    const secondary: PoolDescriptor = {
+      ...primary,
+      poolId: HACKEN_FIXTURE_CONTEXT.secondaryPoolId,
+      tickSpacing: HACKEN_FIXTURE_CONTEXT.secondaryTickSpacing,
+      activity: 1,
+    }
+    const context = {
+      chainId: HACKEN_FIXTURE_CONTEXT.chainId,
+      stateBlockNumber: 1n,
+      executionBlock: FIXTURE_BLOCK,
+      poolManager: HACKEN_FIXTURE_CONTEXT.poolManager,
+      pool: primary,
+      router: allowed,
+      alternateRouter: HACKEN_FIXTURE_CONTEXT.alternateSwapRouter,
+      erc20Router: HACKEN_FIXTURE_CONTEXT.liquidityRouter,
+      actor: ACTOR,
+      alternateActor: HACKEN_FIXTURE_CONTEXT.observer,
+      relocatedAddresses: [],
+      overlay,
+      slot0: { sqrtPriceX96: HACKEN_FIXTURE_CONTEXT.sqrtPriceX96, tick: 0, protocolFee: 0, lpFee: HACKEN_FIXTURE_CONTEXT.fee },
+    } as ProtocolScenarioContext
+
+    try {
+      const probes = await runPublicHackenRuntimeProbes({
+        session,
+        context,
+        pools: [primary, secondary],
+        signal: new AbortController().signal,
+      })
+      const byId = new Map(probes.map((probe) => [probe.caseId, probe]))
+      expect(byId.get('permissions-match-address')).toMatchObject({ status: 'passed' })
+      expect(byId.get('base-hook-pool-manager')).toMatchObject({ status: 'passed' })
+      expect(byId.get('introspect-public-getters')).toMatchObject({ status: 'passed' })
+      expect(byId.get('only-pool-manager')).toMatchObject({ status: 'passed' })
+      expect(byId.get('secondary-pool-open-policy')).toMatchObject({ status: 'passed' })
+    } finally {
+      session.close()
+    }
   })
 
   it('serializes delegatecall code, storage context and exact write frame separately', () => {

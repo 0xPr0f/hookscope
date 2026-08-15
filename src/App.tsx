@@ -16,6 +16,7 @@ import { HowItWorksPage, MethodologyPage } from './pages/InformationPages'
 import { informationPageForPath } from './pages/informationRoutes'
 import { RpcSettingsDialog } from './features/settings/RpcSettingsDialog'
 import { SelectorAwareText } from './features/selectors/SelectorDisplay'
+import { applyTheme, initialTheme, saveThemePreference, THEME_STORAGE_KEY, type AppTheme } from './data/themePreference'
 
 const ContractSourceWorkspace = lazy(() => import('./features/source/ContractSourceWorkspace').then((module) => ({ default: module.ContractSourceWorkspace })))
 
@@ -250,9 +251,7 @@ function App() {
   const { state, discover, analyze, cancel } = useAnalyzer()
   const [chainId, setChainId] = useState(1)
   const [token, setToken] = useState('')
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => (
-    typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-  ))
+  const [theme, setTheme] = useState<AppTheme>(initialTheme)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const selectedChain = useMemo(() => CHAINS.find((chain) => chain.id === chainId)!, [chainId])
   const busy = state.status === 'discovering' || state.status === 'cache' || state.status === 'running'
@@ -264,14 +263,27 @@ function App() {
     : undefined
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme
-    document.documentElement.style.colorScheme = theme
+    applyTheme(theme)
+    saveThemePreference(theme, window.localStorage)
+  }, [theme])
+
+  useEffect(() => {
     document.title = informationPage === 'how'
       ? 'How Hookscope works | Hookscope'
       : informationPage === 'methodology'
         ? 'Methodology | Hookscope'
         : 'Hookscope | Uniswap v4 hook analyzer'
-  }, [informationPage, theme])
+  }, [informationPage])
+
+  useEffect(() => {
+    const synchronizeTheme = (event: StorageEvent) => {
+      if (event.key === THEME_STORAGE_KEY && (event.newValue === 'light' || event.newValue === 'dark')) {
+        setTheme(event.newValue)
+      }
+    }
+    window.addEventListener('storage', synchronizeTheme)
+    return () => window.removeEventListener('storage', synchronizeTheme)
+  }, [])
 
   const findPools = () => discover({ chainId, token })
   const continuePools = (cursor: string) => analyze({ chainId, token, force: true, poolCursor: cursor })

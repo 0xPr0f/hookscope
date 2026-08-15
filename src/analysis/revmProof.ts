@@ -481,7 +481,7 @@ export type ForkExecutionSessionInput = {
   loadHydration?: (request: ForkHydrationRequest) => Promise<ForkHydrationUpdate>
 }
 
-type ForkExecutionInput = {
+export type ForkExecutionInput = {
   transaction: ForkReplayTransaction
   block: ForkReplayBlock
   signal: AbortSignal

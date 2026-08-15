@@ -21,6 +21,23 @@
     <meta property="og:image:height" content="1024" />
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:image" content="/brand/hookscope-transparent-v2-1024.png" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem('hookscope.theme.v1')
+          const theme = saved === 'light' || saved === 'dark'
+            ? saved
+            : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          document.documentElement.dataset.theme = theme
+          document.documentElement.style.colorScheme = theme
+          document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#11120f' : '#ffffff'
+        } catch {
+          const theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          document.documentElement.dataset.theme = theme
+          document.documentElement.style.colorScheme = theme
+        }
+      })()
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/png" sizes="32x32" href="/brand/hookscope-transparent-v2-32.png" />
     <link rel="icon" type="image/png" sizes="48x48" href="/brand/hookscope-transparent-v2-48.png" />

@@ -119,6 +119,26 @@ function session(
         logCount: 0,
       })
     }
+    // Public-hook runtime probes execute after the generated matrix. This test
+    // double models a hook without optional getters/ERC-165 and with direct
+    // callback rejection, while preserving an exact trace selector so the
+    // adapter can distinguish a real hook call from a harness failure.
+    if (input.transaction.to.toLowerCase() === HOOK.toLowerCase()) {
+      const selector = input.transaction.calldata.slice(0, 10) as Hex
+      return replay(false, {
+        calls: [{
+          caller: input.transaction.caller,
+          target: HOOK,
+          bytecodeAddress: HOOK,
+          scheme: 'Call',
+          value: '0',
+          inputLength: input.transaction.calldata.length / 2 - 1,
+          selector,
+        }],
+        logs: [],
+        logCount: 0,
+      })
+    }
     return scenarioExecute(input)
   })
   return {
