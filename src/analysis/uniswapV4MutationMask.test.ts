@@ -14,7 +14,11 @@ import {
   locateUniswapV4Operations,
   type V4PoolKey,
 } from '../adapters/uniswapV4RouterCodec'
-import { deriveUniswapV4MutationMask } from './uniswapV4MutationMask'
+import {
+  deriveUniswapV4MutationMask,
+  isUniswapV4MaskedDerivative,
+  uniswapV4MutationDistance,
+} from './uniswapV4MutationMask'
 
 const CURRENCY0 = '0x0000000000000000000000000000000000000000' as Address
 const CURRENCY1 = '0x1111111111111111111111111111111111111111' as Address
@@ -123,6 +127,8 @@ describe('Uniswap v4 calldata mutation mask', () => {
     expect(mask?.byteIndices.every((index) => index >= 4)).toBe(true)
 
     const mutated = mutateMaskedBytes(calldata, mask!.byteIndices)
+    expect(isUniswapV4MaskedDerivative(mask!, mutated)).toBe(true)
+    expect(uniswapV4MutationDistance(mask!, mutated)).toBe(mask!.byteIndices.length)
     const decoded = decodeUniswapV4Calldata(mutated)
     expect(decoded?.kind).toBe('universal-router')
     if (decoded?.kind !== 'universal-router') throw new Error('Expected Universal Router calldata.')
@@ -243,5 +249,27 @@ describe('Uniswap v4 calldata mutation mask', () => {
 
   it('returns null instead of guessing at an unsupported calldata envelope', () => {
     expect(deriveUniswapV4MutationMask('0x12345678')).toBeNull()
+  })
+
+  it('rejects a candidate that changes the canonical router envelope outside the mask', () => {
+    const swap = encodeAbiParameters(SINGLE_IN_PARAMETERS, [{
+      poolKey: POOL_KEY,
+      zeroForOne: true,
+      amountIn: 123n,
+      amountOutMinimum: 100n,
+      hookData: '0xdeadbeef',
+    }])
+    const calldata = encodeFunctionData({
+      abi: EXECUTE_ABI,
+      functionName: 'execute',
+      args: ['0x10', [actionPlan([V4_ACTIONS.SWAP_EXACT_IN_SINGLE], [swap])], 4_000_000_000n],
+    })
+    const mask = deriveUniswapV4MutationMask(calldata)!
+    const bytes = hexToBytes(calldata)
+    bytes[0] = bytes[0]! ^ 0x01
+    const changedSelector = bytesToHex(bytes)
+
+    expect(isUniswapV4MaskedDerivative(mask, changedSelector)).toBe(false)
+    expect(uniswapV4MutationDistance(mask, changedSelector)).toBe(Number.POSITIVE_INFINITY)
   })
 })

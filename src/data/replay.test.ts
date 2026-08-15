@@ -68,7 +68,7 @@ describe('pinned PoolManager replay candidates', () => {
         reference,
       ],
     })
-    expect(references.map((item) => item.kind)).toEqual(['initialize', 'swap'])
+    expect(references.map((item) => item.kind)).toEqual(['swap', 'initialize'])
   })
 
   it('accepts only a receipt event emitted by the configured PoolManager for the selected PoolId', async () => {

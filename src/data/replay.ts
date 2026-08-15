@@ -34,10 +34,13 @@ export function replayReferencesForPool(pool: PoolDescriptor): PoolReplayReferen
   for (const reference of references) {
     unique.set(`${reference.kind}:${reference.transactionHash.toLowerCase()}`, reference)
   }
+  const kindPriority: Record<PoolReplayKind, number> = { swap: 0, 'modify-liquidity': 1, donate: 2, initialize: 3 }
   return [...unique.values()].sort((left, right) => {
-    const blockOrder = BigInt(left.blockNumber) - BigInt(right.blockNumber)
+    const kindOrder = kindPriority[left.kind] - kindPriority[right.kind]
+    if (kindOrder !== 0) return kindOrder
+    const blockOrder = BigInt(right.blockNumber) - BigInt(left.blockNumber)
     if (blockOrder !== 0n) return blockOrder < 0n ? -1 : 1
-    return left.kind.localeCompare(right.kind)
+    return left.transactionHash.localeCompare(right.transactionHash)
   })
 }
 

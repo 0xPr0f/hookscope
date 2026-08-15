@@ -1,4 +1,5 @@
-import { hexToBytes, type Hex } from 'viem'
+import { bytesToHex, hexToBytes, type Hex } from 'viem'
+import { signedPayloadDigest } from '../adapters/uniswapV4SignedPayloads'
 import {
   cloneAndMutateUniswapV4Operation,
   decodeUniswapV4Calldata,
@@ -27,6 +28,12 @@ export type UniswapV4MutationMaskOptions = {
   maxHookDataFields?: number
   maxHookDataBytesPerField?: number
   maxMutableBytes?: number
+  /**
+   * Restricts the mask to the operations this predicate keeps. The index follows
+   * `locateUniswapV4Operations` order and is preserved on the retained regions,
+   * so a scoped mask still identifies its operation inside the whole call.
+   */
+  keepOperation?: (located: LocatedV4Operation, operationIndex: number) => boolean
 }
 
 export type UniswapV4MutableField = 'amountIn' | 'amountOut' | 'liquidity' | 'hookData'
@@ -47,9 +54,13 @@ export type UniswapV4MutationMask = {
   calldata: Hex
   calldataBytes: number
   byteIndices: number[]
+  /** Identity of the seed's signature-bearing payloads; a derivative must reproduce it exactly. */
+  signedPayloads: string
   regions: UniswapV4MutableRegion[]
   operationsSeen: number
   operationsConsidered: number
+  /** Operations kept by `keepOperation`; equals `operationsConsidered` when no predicate is supplied. */
+  operationsSelected: number
   hookDataFieldsSeen: number
   hookDataFieldsConsidered: number
   truncated: boolean
@@ -269,6 +280,28 @@ function evenlySpaced(values: readonly number[], maximum: number): number[] {
 }
 
 /**
+ * Proves the mask cannot reach a signature.
+ *
+ * Flipping every masked byte at once is the strongest mutation the mask can
+ * ever authorize, so if the signed payloads survive that, no derived candidate
+ * can invalidate an original signature. The codec already keeps signed bytes
+ * out of mutable fields; this turns that inherited property into an enforced one.
+ */
+function assertSignedPayloadsOutsideMask(
+  calldata: Hex,
+  digest: string,
+  byteIndices: readonly number[],
+) {
+  if (!byteIndices.length) return
+  const probe = hexToBytes(calldata)
+  for (const index of byteIndices) probe[index] = probe[index]! ^ 0xff
+  const mutated = decodeUniswapV4Calldata(bytesToHex(probe))
+  if (!mutated || signedPayloadDigest(mutated) !== digest) {
+    throw new Error('The derived mutation mask overlaps a signed payload; refusing to produce it.')
+  }
+}
+
+/**
  * Derives a conservative mutation mask from an already-canonical decoded call.
  *
  * Only the low-order value bytes of the primary swap amount, the complete value
@@ -298,7 +331,11 @@ export function deriveUniswapV4MutationMaskFromDecoded(
   let hookDataFieldsSeen = 0
   let hookDataFieldsConsidered = 0
 
+  let operationsSelected = 0
+
   considered.forEach((located, operationIndex) => {
+    if (options.keepOperation && !options.keepOperation(located, operationIndex)) return
+    operationsSelected += 1
     const scalar = discoverScalarRegion(calldata, decoded, located, operationIndex)
     if (scalar) scalarRegions.push(scalar)
     for (const field of hookDataFields(located.operation)) {
@@ -333,6 +370,8 @@ export function deriveUniswapV4MutationMaskFromDecoded(
   }
 
   const byteIndices = [...new Set(regions.flatMap((region) => region.byteIndices))].sort((left, right) => left - right)
+  const signedPayloads = signedPayloadDigest(decoded)
+  assertSignedPayloadsOutsideMask(calldata, signedPayloads, byteIndices)
   const candidateBytesWithinFieldLimits = scalarRegions.reduce((total, region) => total + region.totalValueBytes, 0)
     + hookRegions.reduce(
       (total, region) => total + Math.min(region.totalValueBytes, limits.maxHookDataBytesPerField),
@@ -345,9 +384,11 @@ export function deriveUniswapV4MutationMaskFromDecoded(
     calldata,
     calldataBytes,
     byteIndices,
+    signedPayloads,
     regions,
     operationsSeen: operations.length,
     operationsConsidered: considered.length,
+    operationsSelected,
     hookDataFieldsSeen,
     hookDataFieldsConsidered,
     truncated: operations.length > considered.length
@@ -367,4 +408,36 @@ export function deriveUniswapV4MutationMask(
   if (!decoded) return null
   const mask = deriveUniswapV4MutationMaskFromDecoded(decoded, options)
   return sameHex(mask.calldata, calldata) ? mask : null
+}
+
+/**
+ * Verifies that a generated candidate keeps the exact canonical router
+ * envelope and differs from its seed only at byte positions owned by the
+ * conservative mutation mask.
+ */
+export function isUniswapV4MaskedDerivative(mask: UniswapV4MutationMask, candidate: Hex): boolean {
+  if (byteLength(candidate) !== mask.calldataBytes) return false
+  const decoded = decodeUniswapV4Calldata(candidate)
+  if (!decoded || !sameHex(encodeUniswapV4Calldata(decoded), candidate)) return false
+  if (signedPayloadDigest(decoded) !== mask.signedPayloads) return false
+
+  const original = hexToBytes(mask.calldata)
+  const mutated = hexToBytes(candidate)
+  const allowed = new Set(mask.byteIndices)
+  for (let index = 0; index < original.length; index++) {
+    if (original[index] !== mutated[index] && !allowed.has(index)) return false
+  }
+  return true
+}
+
+/** Number of bytes whose values differ from the canonical seed. */
+export function uniswapV4MutationDistance(mask: UniswapV4MutationMask, candidate: Hex): number {
+  if (!isUniswapV4MaskedDerivative(mask, candidate)) return Number.POSITIVE_INFINITY
+  const original = hexToBytes(mask.calldata)
+  const mutated = hexToBytes(candidate)
+  let distance = 0
+  for (let index = 0; index < original.length; index++) {
+    if (original[index] !== mutated[index]) distance += 1
+  }
+  return distance
 }

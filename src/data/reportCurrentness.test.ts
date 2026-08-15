@@ -180,6 +180,8 @@ function replayResult(overrides: Partial<ForkReplayResult['proof']> = {}): ForkR
       storageOperations: [],
       calls: [],
       storageDiffs: [],
+      balanceChanges: [],
+      logs: [],
       logCount: 1,
       selfdestructs: [],
       truncated: false,

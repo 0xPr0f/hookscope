@@ -26,8 +26,8 @@ use revm::{
     database::{BenchmarkDB, BENCH_CALLER, BENCH_TARGET},
     inspector::{InspectEvm, Inspector},
     interpreter::{
-        interpreter_types::{InputsTr, Jumps},
-        CallInputs, CallOutcome, Interpreter, InterpreterTypes,
+        interpreter_types::{InputsTr, Jumps, StackTr},
+        CallInput, CallInputs, CallOutcome, Interpreter, InterpreterTypes,
     },
     primitives::{Address, Bytes, Log, TxKind, U256},
     state::{
@@ -45,6 +45,7 @@ use wasm_bindgen::prelude::*;
 mod fork;
 
 const MAX_STEP_EVENTS: usize = 50_000;
+const MAX_LOG_EVENTS: usize = 1_024;
 #[cfg(feature = "libafl-fuzz")]
 const FUZZ_COVERAGE_MAP_SIZE: usize = 65_536;
 #[cfg(feature = "libafl-fuzz")]
@@ -90,6 +91,39 @@ struct CallEvidence {
     scheme: String,
     value: String,
     input_length: usize,
+    /// Four-byte selector when the call input is owned bytes. A shared-buffer
+    /// input is left unresolved rather than reconstructed from interpreter memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+}
+
+/// A storage-family opcode with the key it addressed, and the value for writes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageAccessEvidence {
+    address: String,
+    pc: usize,
+    opcode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogEvidence {
+    address: String,
+    topics: Vec<String>,
+    data: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BalanceChange {
+    address: String,
+    before: String,
+    after: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,8 +138,9 @@ struct StorageDiff {
 #[derive(Debug)]
 struct EvidenceInspector {
     steps: Vec<StepEvidence>,
-    storage_operations: Vec<StepEvidence>,
+    storage_operations: Vec<StorageAccessEvidence>,
     calls: Vec<CallEvidence>,
+    logs: Vec<LogEvidence>,
     log_count: usize,
     selfdestructs: Vec<(String, String, String)>,
     truncated: bool,
@@ -124,6 +159,7 @@ impl EvidenceInspector {
             steps: Vec::new(),
             storage_operations: Vec::new(),
             calls: Vec::new(),
+            logs: Vec::new(),
             log_count: 0,
             selfdestructs: Vec::new(),
             truncated: false,
@@ -155,10 +191,24 @@ where
             opcode_byte,
             opcode::SLOAD | opcode::SSTORE | opcode::TLOAD | opcode::TSTORE
         ) {
-            self.storage_operations.push(StepEvidence {
+            // The key is on top of the stack before the opcode executes; a write
+            // carries its value directly beneath it.
+            let stack = interp.stack.data();
+            let writes = matches!(opcode_byte, opcode::SSTORE | opcode::TSTORE);
+            self.storage_operations.push(StorageAccessEvidence {
                 address: event.address.clone(),
                 pc: event.pc,
                 opcode: event.opcode.clone(),
+                slot: stack.last().map(|slot| format!("0x{slot:064x}")),
+                value: if writes {
+                    stack
+                        .len()
+                        .checked_sub(2)
+                        .and_then(|index| stack.get(index))
+                        .map(|value| format!("0x{value:064x}"))
+                } else {
+                    None
+                },
             });
         }
         if self.steps.len() < self.step_limit {
@@ -176,12 +226,31 @@ where
             scheme: format!("{:?}", inputs.scheme),
             value: inputs.transfer_value().unwrap_or(U256::ZERO).to_string(),
             input_length: inputs.input.len(),
+            selector: match &inputs.input {
+                CallInput::Bytes(bytes) if bytes.len() >= 4 => {
+                    Some(format!("0x{}", hex::encode(&bytes[..4])))
+                }
+                _ => None,
+            },
         });
         None
     }
 
-    fn log(&mut self, _context: &mut CTX, _log: Log) {
+    fn log(&mut self, _context: &mut CTX, log: Log) {
         self.log_count += 1;
+        if self.logs.len() < MAX_LOG_EVENTS {
+            self.logs.push(LogEvidence {
+                address: format!("{:?}", log.address),
+                topics: log
+                    .topics()
+                    .iter()
+                    .map(|topic| format!("{topic:?}"))
+                    .collect(),
+                data: format!("0x{}", hex::encode(&log.data.data)),
+            });
+        } else {
+            self.truncated = true;
+        }
     }
 
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
@@ -201,9 +270,11 @@ struct ExecutionProof {
     gas_used: u64,
     output: String,
     steps: Vec<StepEvidence>,
-    storage_operations: Vec<StepEvidence>,
+    storage_operations: Vec<StorageAccessEvidence>,
     calls: Vec<CallEvidence>,
     storage_diffs: Vec<StorageDiff>,
+    balance_changes: Vec<BalanceChange>,
+    logs: Vec<LogEvidence>,
     log_count: usize,
     selfdestructs: Vec<(String, String, String)>,
     truncated: bool,
@@ -234,6 +305,22 @@ struct ExplorationSummary {
 fn decode_hex(value: &str, field: &str) -> Result<Vec<u8>, String> {
     hex::decode(value.strip_prefix("0x").unwrap_or(value))
         .map_err(|error| format!("{field} is not valid hex: {error}"))
+}
+
+/// Native value movement, taken from the journal's own original account info
+/// rather than re-read from the database.
+pub(crate) fn balance_changes(state: &EvmState) -> Vec<BalanceChange> {
+    let mut changes: Vec<BalanceChange> = state
+        .iter()
+        .filter(|(_, account)| account.info.balance != account.original_info.balance)
+        .map(|(address, account)| BalanceChange {
+            address: format!("{address:?}"),
+            before: account.original_info.balance.to_string(),
+            after: account.info.balance.to_string(),
+        })
+        .collect();
+    changes.sort_by(|left, right| left.address.cmp(&right.address));
+    changes
 }
 
 fn state_diffs(state: &EvmState) -> Vec<StorageDiff> {
@@ -289,6 +376,8 @@ fn execute_decoded(
         storage_operations: inspector.storage_operations,
         calls: inspector.calls,
         storage_diffs: state_diffs(&result_and_state.state),
+        balance_changes: balance_changes(&result_and_state.state),
+        logs: inspector.logs,
         log_count: inspector.log_count,
         selfdestructs: inspector.selfdestructs,
         truncated: inspector.truncated,
@@ -593,7 +682,6 @@ pub fn fuzz_runtime_with_seeds(
 mod tests {
     use super::*;
 
-    #[cfg(feature = "libafl-fuzz")]
     #[test]
     fn emits_instruction_call_and_storage_evidence() {
         let proof = execute("0x600160005500", "0x").expect("fixture must execute");
@@ -608,6 +696,34 @@ mod tests {
             .storage_diffs
             .iter()
             .any(|diff| diff.after.ends_with('1')));
+    }
+
+    #[test]
+    fn records_storage_keys_written_values_and_logs() {
+        // PUSH1 1, PUSH1 0, SSTORE, PUSH1 0, PUSH1 0, LOG0, STOP
+        let proof = execute("0x60016000556000600060a000", "0x").expect("fixture must execute");
+        let write = proof
+            .storage_operations
+            .iter()
+            .find(|event| event.opcode == "SSTORE")
+            .expect("SSTORE must be observed");
+        assert_eq!(write.slot.as_deref(), Some(format!("0x{:064x}", 0)).as_deref());
+        assert_eq!(write.value.as_deref(), Some(format!("0x{:064x}", 1)).as_deref());
+        let read = proof
+            .storage_operations
+            .iter()
+            .find(|event| event.opcode == "SLOAD");
+        assert!(read.is_none_or(|event| event.value.is_none()));
+    }
+
+    #[test]
+    fn records_log_address_topics_and_data() {
+        // PUSH1 0 (size), PUSH1 0 (offset), LOG0, STOP
+        let proof = execute("0x60006000a000", "0x").expect("fixture must execute");
+        assert_eq!(proof.log_count, 1);
+        assert_eq!(proof.logs.len(), 1);
+        assert!(proof.logs[0].topics.is_empty());
+        assert_eq!(proof.logs[0].data, "0x");
     }
 
     #[test]
@@ -627,6 +743,7 @@ mod tests {
             .any(|witness| witness.calldata.ends_with('1')));
     }
 
+    #[cfg(feature = "libafl-fuzz")]
     #[test]
     fn libafl_scheduler_reaches_both_calldata_state_outcomes() {
         let summary = libafl_explore(

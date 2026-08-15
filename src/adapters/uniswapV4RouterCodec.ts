@@ -994,11 +994,10 @@ function decodeUniversalRouterPlan(
       hasV4Command = true
       const call = decodePositionManagerCall(rawInput)
       if (call?.kind !== 'modify-liquidities') return base
-      const unsafeAction = call.plan.items.some((item) =>
-        item.action === V4_ACTIONS.INCREASE_LIQUIDITY
-        || item.action === V4_ACTIONS.DECREASE_LIQUIDITY
-        || item.action === V4_ACTIONS.BURN_POSITION)
-      return unsafeAction ? base : { ...base, decoded: { kind: 'v4-position-manager-call', call } }
+      // Token-ID-only actions decode here, but decoding is not attribution: an
+      // operation identified only by token ID reaches a scenario or a mutation
+      // mask solely once its PoolId has been resolved from pinned chain state.
+      return { ...base, decoded: { kind: 'v4-position-manager-call', call } }
     }
     if (isUniversalRouterCommand(command, UNIVERSAL_ROUTER_COMMANDS.EXECUTE_SUB_PLAN) && depth < MAX_UNIVERSAL_ROUTER_SUBPLAN_DEPTH) {
       try {

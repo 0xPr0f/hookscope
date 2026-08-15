@@ -17,7 +17,7 @@ Vercel and Railway are separate networks. A Vercel Function cannot use Railway's
 |---|---|---|
 | `DATABASE_URL` | Vercel Functions only | PostgreSQL URL for the runtime role. Set separately for Preview and Production. Never prefix it with `VITE_`. |
 | `VITE_RPC_<chainId>` | Public browser bundle | Optional RPC override. Use a public endpoint or a browser/domain-restricted credential. |
-| `VITE_V4_POOL_INDEX_<chainId>` | Public browser bundle | Token-sharded index URL; supports `{chainId}`, `{chainSlug}`, and `{token}` placeholders. |
+| `VITE_GRAPH_API_KEY` | Public browser bundle | One domain-restricted Graph Network key; serves every chain whose subgraph ID is in the registry. |
 | `VITE_V4_SUBGRAPH_<chainId>` | Public browser bundle | Optional v4 GraphQL endpoint. Use only browser-safe credentials. |
 
 `VITE_` values are build-time public configuration: anyone can inspect them in the generated JavaScript. Vercel environment changes affect only later deployments, so rebuild after every change. Do not commit `.env.local`, `.env.preview`, `.env.production`, Vercel's `.vercel/` link metadata, or either database URL.
@@ -98,8 +98,8 @@ vercel env add DATABASE_URL preview
 vercel env add DATABASE_URL production
 vercel env add VITE_RPC_1 preview
 vercel env add VITE_RPC_1 production
-vercel env add VITE_V4_POOL_INDEX_1 preview
-vercel env add VITE_V4_POOL_INDEX_1 production
+vercel env add VITE_GRAPH_API_KEY preview
+vercel env add VITE_GRAPH_API_KEY production
 vercel env ls
 ```
 

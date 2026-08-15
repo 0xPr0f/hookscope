@@ -41,6 +41,8 @@ describe('Uniswap v4 pool index fetcher', () => {
           liquidity: '500',
           txCount: '12',
           createdAtBlockNumber: '95',
+          swaps: [{ transaction: { id: `0x${'ab'.repeat(32)}`, blockNumber: '119' } }],
+          modifyLiquiditys: [{ transaction: { id: `0x${'cd'.repeat(32)}`, blockNumber: '118' } }],
         }
         return new Response(JSON.stringify({
           data: {
@@ -58,6 +60,7 @@ describe('Uniswap v4 pool index fetcher', () => {
     expect(result?.pools).toHaveLength(1)
     expect(result?.pools[0]?.liquidity).toBe('500')
     expect(result?.pools[0]?.activity).toBe(12)
+    expect(result?.pools[0]?.replayTransactions?.map((reference) => reference.kind)).toEqual(['swap', 'modify-liquidity'])
   })
 
   it('accepts bounded representative transaction references from a static index', async () => {
@@ -85,6 +88,40 @@ describe('Uniswap v4 pool index fetcher', () => {
     })
 
     expect(result?.source).toBe('static-index')
+    expect(result?.limitations.join(' ')).toContain('checksum was not verified')
     expect(result?.pools[0]?.replayTransactions).toEqual([{ kind: 'swap', transactionHash, blockNumber: '110' }])
+  })
+
+  it('rejects a shard whose bytes disagree with the published manifest checksum', async () => {
+    const document = {
+      schemaVersion: '1',
+      chainId: 1,
+      poolManager: chain.poolManager,
+      token: TOKEN,
+      indexedThroughBlock: '100',
+      pools: [],
+    }
+    const body = JSON.stringify(document)
+    const fetcher = async (url: string) => {
+      if (url.endsWith('manifest.json')) {
+        return new Response(JSON.stringify({
+          schemaVersion: '1',
+          chainId: 1,
+          documents: [{ token: TOKEN.toLowerCase(), checksum: `sha256:${'0'.repeat(64)}` }],
+        }), { status: 200 })
+      }
+      return new Response(body, { status: 200 })
+    }
+
+    const result = await fetchPoolIndex({
+      chain: { ...chain, poolIndexUrl: 'https://cdn.example.com/v1/{chainId}/{token}.json' },
+      token: TOKEN,
+      fetcher: fetcher as never,
+    })
+
+    // The substituted shard is refused; discovery degrades visibly instead of trusting it.
+    expect(result?.source).not.toBe('static-index')
+    expect(result?.pools).toEqual([])
+    expect(result?.limitations.join(' ')).toContain('does not match its published manifest checksum')
   })
 })

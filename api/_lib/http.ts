@@ -4,6 +4,33 @@ const MAX_REQUESTS = 12
 const WINDOW_MS = 60_000
 const submissionWindows = new Map<string, { startedAt: number; count: number }>()
 
+/**
+ * Discovery pages through a subgraph, so it needs a looser ceiling than report
+ * submission. Like the submission brake this is instance-local and resets on a
+ * cold start; it bounds one instance, not the deployment.
+ */
+const MAX_DISCOVERY_REQUESTS = 120
+const discoveryWindows = new Map<string, { startedAt: number; count: number }>()
+
+function withinWindow(
+  windows: Map<string, { startedAt: number; count: number }>,
+  ip: string,
+  max: number,
+): boolean {
+  const now = Date.now()
+  const current = windows.get(ip)
+  if (!current || now - current.startedAt > WINDOW_MS) {
+    windows.set(ip, { startedAt: now, count: 1 })
+    return true
+  }
+  current.count += 1
+  return current.count <= max
+}
+
+export function discoveryAllowed(ip: string): boolean {
+  return withinWindow(discoveryWindows, ip, MAX_DISCOVERY_REQUESTS)
+}
+
 export function allowMethods(response: VercelResponse, methods: string[]) {
   response.setHeader('Allow', methods.join(', '))
   response.setHeader('Cache-Control', 'no-store')

@@ -31,6 +31,8 @@ const replayResult: ForkReplayResult = {
     storageOperations: [],
     calls: [],
     storageDiffs: [],
+    balanceChanges: [],
+    logs: [],
     logCount: 1,
     selfdestructs: [],
     truncated: false,
@@ -78,10 +80,31 @@ describe('live pool replay coverage', () => {
     })
 
     expect(result.status).toBe('degraded')
-    expect(result.candidateTransactions).toBe(2)
-    expect(result.passedTransactions).toBe(2)
+    expect(result.candidateTransactions).toBe(1)
+    expect(result.passedTransactions).toBe(1)
     expect(result.coveredPools).toBe(1)
-    expect(result.findings).toHaveLength(2)
-    expect(result.limitations[0]).toContain('1 selected pool has')
+    expect(result.findings).toHaveLength(1)
+    expect(result.limitations[0]).toContain('No indexed historical transaction')
+    expect(result.limitations[1]).toContain('1 selected pool has')
+  })
+
+  it('reports an RPC capability failure without exposing the endpoint URL', async () => {
+    const selected = pool('3')
+    selected.replayTransactions = [{ kind: 'swap', transactionHash: `0x${'ef'.repeat(32)}`, blockNumber: '110' }]
+    const result = await runLivePoolReplays({
+      scanId: 'rpc-failure',
+      client: {} as PublicClient,
+      chainId: 1,
+      poolManager: POOL_MANAGER,
+      pinnedBlockNumber: 120n,
+      pools: [selected],
+      signal: new AbortController().signal,
+      loadCandidate: async () => {
+        throw new Error('HTTP request failed: rate limit at https://secret.example/key')
+      },
+    })
+
+    expect(result.limitations[0]).toBe('The configured RPC endpoints could not provide all parent-block account or storage state required by replay.')
+    expect(result.limitations.join(' ')).not.toContain('secret.example')
   })
 })

@@ -1,11 +1,16 @@
-import { useMemo, useState } from 'react'
-import { Activity, ArrowRight, Check, ChevronDown, ChevronRight, CircleStop, Download, ExternalLink, RotateCcw } from 'lucide-react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { Activity, ArrowRight, Check, ChevronDown, ChevronRight, CircleStop, Download, ExternalLink, Moon, RotateCcw, Sun } from 'lucide-react'
 import { CHAINS } from './config/chains'
 import { shortAddress } from './domain/address'
+import { formatPoolFee } from './domain/poolFee'
 import type { AnalysisReport, Evidence, Severity } from './domain/report'
 import type { CompletedReportCurrentness } from './data/reportCurrentness'
 import { FIXTURE_SCAN_ADDRESS } from './fixtures/bytecode'
 import { useAnalyzer } from './features/analyzer/useAnalyzer'
+import { ScenarioResults } from './features/scenarios/ScenarioResults'
+import { ChainDropdown } from './components/ChainDropdown'
+
+const ContractSourceWorkspace = lazy(() => import('./features/source/ContractSourceWorkspace').then((module) => ({ default: module.ContractSourceWorkspace })))
 
 const impactOrder: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
 
@@ -66,22 +71,33 @@ function PhaseRail({ report }: { report: AnalysisReport }) {
     <div className="phase-rail" aria-label="Analysis phase coverage">
       {report.phases.map((phase) => (
         <div className={`phase-node phase-${phase.status}`} key={phase.id} title={phase.detail}>
-          <span>{phase.status === 'completed' ? <Check size={12} /> : '—'}</span>
-          <b>{phase.label}</b>
+          <span aria-label={phase.status === 'completed' ? 'Completed' : phase.status === 'degraded' && phase.completed > 0 ? 'Observed with limits' : 'Unavailable'}>
+            {phase.status === 'completed'
+              ? <Check size={12} aria-hidden="true" />
+              : phase.status === 'degraded' && phase.completed > 0
+                ? <Activity size={12} aria-hidden="true" />
+                : '—'}
+          </span>
+          <div className="phase-copy">
+            <b>{phase.label}</b>
+            {phase.status === 'degraded' && phase.detail && <small>{phase.detail}</small>}
+          </div>
         </div>
       ))}
     </div>
   )
 }
 
-function ReportView({ report, history, currentnessStatus, currentness, onRunAgain, onContinue }: {
+function ReportView({ report, history, currentnessStatus, currentness, theme, onRunAgain, onContinue }: {
   report: AnalysisReport
   history: AnalysisReport[]
   currentnessStatus?: 'checking' | 'checked'
   currentness?: CompletedReportCurrentness
+  theme: 'light' | 'dark'
   onRunAgain: () => void
   onContinue: (cursor: string) => void
 }) {
+  const [tab, setTab] = useState<'overview' | 'evidence' | 'contracts' | 'tests'>('overview')
   const impact = strongestImpact(report)
   const materialFindings = report.findings.filter((finding) => finding.severity !== 'info')
   const callbackFacts = report.findings.filter((finding) => finding.detectorId === 'hook-permission-bits')
@@ -116,97 +132,101 @@ function ReportView({ report, history, currentnessStatus, currentness, onRunAgai
       {currentnessStatus === 'checked' && !currentness && (
         <div className="currentness-note currentness-unavailable">Currentness could not be checked. Run the analysis again to create a fresh report.</div>
       )}
-      <PhaseRail report={report} />
-
-      <div className="assessment-grid">
-        <div className="assessment-primary">
-          <p className="eyebrow">Behavior assessment</p>
-          <div className={`impact-word impact-text-${impact}`}>{impactLabel(impact)}</div>
-          <p>{materialFindings.length} material behavior{materialFindings.length === 1 ? '' : 's'} mapped across {report.poolCoverage.analyzed} pool{report.poolCoverage.analyzed === 1 ? '' : 's'} at a pinned block.</p>
-        </div>
-        <div className="assessment-stat">
-          <span>Pool coverage</span>
-          <strong>{report.poolCoverage.analyzed}<small> / {report.poolCoverage.discovered}</small></strong>
-          <p>{report.poolCoverage.hasMore ? 'Additional pools require continuation.' : 'All discovered pools in this batch are represented.'}</p>
-        </div>
-        <div className="assessment-stat">
-          <span>PoolManager scenarios</span>
-          <strong>{report.scenarios.completed}<small> / {report.scenarios.total}</small></strong>
-          <p>{scenarioPhase?.detail ?? `${report.coverage.uniqueCodeHashes} code identities · ${report.coverage.paths} mapped blocks`}</p>
-        </div>
+      <div className="report-tabs" role="tablist" aria-label="Report sections">
+        <button type="button" role="tab" aria-selected={tab === 'overview'} aria-controls="report-panel-overview" onClick={() => setTab('overview')}>Overview</button>
+        <button type="button" role="tab" aria-selected={tab === 'evidence'} aria-controls="report-panel-evidence" onClick={() => setTab('evidence')}>Evidence <span>{report.findings.length}</span></button>
+        <button type="button" role="tab" aria-selected={tab === 'contracts'} aria-controls="report-panel-contracts" onClick={() => setTab('contracts')}>Contracts <span>{report.contractGraph.length}</span></button>
+        <button type="button" role="tab" aria-selected={tab === 'tests'} aria-controls="report-panel-tests" onClick={() => setTab('tests')}>Tests <span>{report.scenarios.completed}</span></button>
       </div>
 
-      <div className="report-section-heading">
-        <div><p className="eyebrow">Evidence ledger</p><h2>What the deployed mechanism can do</h2></div>
-        <button className="text-button" onClick={() => downloadReport(report)}><Download size={14} /> Export JSON</button>
-      </div>
-      <div className="evidence-ledger">
-        {report.findings.length ? report.findings.map((finding) => <EvidenceRow finding={finding} key={finding.id} />) : (
-          <p className="empty-ledger">No reportable bytecode behavior was recovered for this batch.</p>
-        )}
-      </div>
-
-      <div className="report-columns">
-        <section>
-          <p className="eyebrow">Pool / hook map</p>
-          <h3>{report.pools.length} analyzed combinations</h3>
-          <div className="pool-list">
-            {report.pools.map((pool) => (
-              <div className="pool-row" key={pool.poolId}>
-                <span><b>{pool.fee / 10_000}%</b> fee</span>
-                <span>Hook {shortAddress(pool.hook)}</span>
-                <code>{pool.poolId.slice(0, 10)}…</code>
+      {tab === 'overview' && (
+        <div id="report-panel-overview" role="tabpanel" className="report-tab-panel">
+          <PhaseRail report={report} />
+          <div className="assessment-grid">
+            <div className="assessment-primary">
+              <p className="eyebrow">Behavior assessment</p>
+              <div className={`impact-word impact-text-${impact}`}>{impactLabel(impact)}</div>
+              <p>{materialFindings.length} material behavior{materialFindings.length === 1 ? '' : 's'} mapped across {report.poolCoverage.analyzed} pool{report.poolCoverage.analyzed === 1 ? '' : 's'} at a pinned block.</p>
+            </div>
+            <div className="assessment-stat">
+              <span>Pool coverage</span>
+              <strong>{report.poolCoverage.analyzed}<small> / {report.poolCoverage.discovered}</small></strong>
+              <p>{report.poolCoverage.hasMore ? 'Additional pools require continuation.' : 'All discovered pools in this batch are represented.'}</p>
+            </div>
+            <div className="assessment-stat">
+              <span>PoolManager scenarios</span>
+              <strong>{report.scenarios.completed}<small> / {report.scenarios.total}</small></strong>
+              <p>{scenarioPhase?.detail ?? `${report.coverage.uniqueCodeHashes} code identities · ${report.coverage.paths} mapped blocks`}</p>
+            </div>
+          </div>
+          <div className="report-columns">
+            <section>
+              <p className="eyebrow">Pool / hook map</p>
+              <h3>{report.pools.length} analyzed combinations</h3>
+              <div className="pool-list">
+                {report.pools.map((pool) => (
+                  <div className="pool-row" key={pool.poolId}>
+                    <span><b>{formatPoolFee(pool.fee)}</b> fee</span>
+                    <span>Hook {shortAddress(pool.hook)}</span>
+                    <code>{pool.poolId.slice(0, 10)}…</code>
+                  </div>
+                ))}
+                {!report.pools.length && <p>No verified pool initialized with this token at the pinned block.</p>}
               </div>
-            ))}
-            {!report.pools.length && <p>No verified pool initialized with this token at the pinned block.</p>}
+            </section>
+            <section>
+              <p className="eyebrow">Callback behavior</p>
+              <h3>{callbackFacts.length} permission record{callbackFacts.length === 1 ? '' : 's'}</h3>
+              <p className="section-copy">Callback bits are decoded directly from each hook address. Open Evidence for exact permission names and affected pools.</p>
+            </section>
+            <section>
+              <p className="eyebrow">Capability coverage</p>
+              <h3>{Object.values(report.capabilities).filter((capability) => capability.status === 'passed').length} of 4 passed</h3>
+              <ul className="capability-list">
+                {Object.entries(report.capabilities).map(([name, capability]) => <li key={name}><span className={capability.status}>{capability.status === 'passed' ? '●' : '○'}</span>{name}<small>{capability.status}</small></li>)}
+              </ul>
+            </section>
           </div>
-        </section>
-        <section>
-          <p className="eyebrow">Callback behavior</p>
-          <h3>{callbackFacts.length} permission record{callbackFacts.length === 1 ? '' : 's'}</h3>
-          <p className="section-copy">Callback bits are decoded directly from each hook address. Expand their ledger rows for exact permission names and affected pools.</p>
-        </section>
-        <section>
-          <p className="eyebrow">Capability coverage</p>
-          <h3>{Object.values(report.capabilities).filter((capability) => capability.status === 'passed').length} of 4 passed</h3>
-          <ul className="capability-list">
-            {Object.entries(report.capabilities).map(([name, capability]) => <li key={name}><span className={capability.status}>{capability.status === 'passed' ? '●' : '○'}</span>{name}<small>{capability.status}</small></li>)}
-          </ul>
-        </section>
-      </div>
-
-      <div className="report-section-heading">
-        <div><p className="eyebrow">Source / proxy graph</p><h2>Resolved contract identities</h2></div>
-      </div>
-      <div className="pool-list">
-        {report.contractGraph.map((node) => (
-          <div className="pool-row" key={`${node.address}:${node.codeHash}`}>
-            <span><b>{node.role}</b> · {shortAddress(node.address)}</span>
-            <span>{node.sourceMetadata
-              ? `${node.sourceMetadata.contractName ?? 'Verified contract'} · ${node.sourceMetadata.compilerVersion ?? node.sourceMetadata.language ?? 'compiler recorded'}`
-              : 'Bytecode interface inferred'}</span>
-            <code>{node.selectors.length} selector{node.selectors.length === 1 ? '' : 's'}</code>
+          {report.limitations.length > 0 && (
+            <div className="limitations"><b>Coverage limitations</b>{report.limitations.map((item) => <p key={item}>{item}</p>)}</div>
+          )}
+          <div className="report-actions">
+            <button className="secondary-button" onClick={onRunAgain}><RotateCcw size={14} /> Run analysis again</button>
+            {report.poolCoverage.hasMore && report.poolCoverage.nextCursor && (
+              <button className="primary-button" onClick={() => onContinue(report.poolCoverage.nextCursor!)}>Continue remaining pools <ArrowRight size={15} /></button>
+            )}
           </div>
-        ))}
-      </div>
-
-      {report.limitations.length > 0 && (
-        <div className="limitations"><b>Coverage limitations</b>{report.limitations.map((item) => <p key={item}>{item}</p>)}</div>
-      )}
-
-      <div className="report-actions">
-        <button className="secondary-button" onClick={onRunAgain}><RotateCcw size={14} /> Run analysis again</button>
-        {report.poolCoverage.hasMore && report.poolCoverage.nextCursor && (
-          <button className="primary-button" onClick={() => onContinue(report.poolCoverage.nextCursor!)}>Continue remaining pools <ArrowRight size={15} /></button>
-        )}
-      </div>
-
-      {history.length > 0 && (
-        <div className="history">
-          <p className="eyebrow">Previous completed reports</p>
-          {history.map((item) => <div className="history-row" key={item.id}><span>{formatDate(item.createdAt)}</span><span>Block {item.blockNumber}</span><span>{item.findings.length} evidence records</span><ChevronRight size={14} /></div>)}
+          {history.length > 0 && (
+            <div className="history">
+              <p className="eyebrow">Previous completed reports</p>
+              {history.map((item) => <div className="history-row" key={item.id}><span>{formatDate(item.createdAt)}</span><span>Block {item.blockNumber}</span><span>{item.findings.length} evidence records</span><ChevronRight size={14} /></div>)}
+            </div>
+          )}
         </div>
       )}
+
+      {tab === 'evidence' && (
+        <div id="report-panel-evidence" role="tabpanel" className="report-tab-panel">
+          <div className="report-section-heading">
+            <div><p className="eyebrow">Evidence ledger</p><h2>What the deployed mechanism can do</h2></div>
+            <button className="text-button" onClick={() => downloadReport(report)}><Download size={14} /> Export JSON</button>
+          </div>
+          <div className="evidence-ledger">
+            {report.findings.length ? report.findings.map((finding) => <EvidenceRow finding={finding} key={finding.id} />) : (
+              <p className="empty-ledger">No reportable bytecode behavior was recovered for this batch.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'contracts' && (
+        <div id="report-panel-contracts" role="tabpanel" className="report-tab-panel">
+          <Suspense fallback={<div className="source-loading source-ide-loading" role="status"><span /> Loading the source workspace…</div>}>
+            <ContractSourceWorkspace report={report} theme={theme} />
+          </Suspense>
+        </div>
+      )}
+      {tab === 'tests' && <div id="report-panel-tests" role="tabpanel" className="report-tab-panel"><ScenarioResults report={report} /></div>}
     </section>
   )
 }
@@ -215,8 +235,16 @@ function App() {
   const { state, analyze, cancel } = useAnalyzer()
   const [chainId, setChainId] = useState(1)
   const [token, setToken] = useState('')
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (
+    typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  ))
   const selectedChain = useMemo(() => CHAINS.find((chain) => chain.id === chainId)!, [chainId])
   const busy = state.status === 'cache' || state.status === 'running'
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+  }, [theme])
 
   const submit = (force = false, cursor?: string) => analyze({ chainId, token, force, poolCursor: cursor })
   const loadFixture = () => {
@@ -228,11 +256,22 @@ function App() {
     <div className="app-shell">
       <header className="site-header">
         <a className="brand" href="#top"><span className="brand-mark"><i /><i /><i /></span>Hookscope</a>
-        <nav aria-label="Primary navigation">
-          <a href="#method">How it works</a>
-          <a href="/docs/V4_HOOK_ANALYZER_ARCHITECTURE.md" target="_blank">Methodology</a>
-          <a href="https://github.com/Uniswap/v4-core" target="_blank" rel="noreferrer">v4 Core <ExternalLink size={12} /></a>
-        </nav>
+        <div className="header-actions">
+          <nav aria-label="Primary navigation">
+            <a href="#method">How it works</a>
+            <a href="/docs/V4_HOOK_ANALYZER_ARCHITECTURE.md" target="_blank">Methodology</a>
+            <a href="https://github.com/Uniswap/v4-core" target="_blank" rel="noreferrer">v4 Core <ExternalLink size={12} /></a>
+          </nav>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+        </div>
       </header>
 
       <main id="top">
@@ -244,7 +283,7 @@ function App() {
           <form className="scan-form" onSubmit={(event) => { event.preventDefault(); submit(false) }}>
             <label>
               <span>Chain</span>
-              <div className="select-wrap"><select value={chainId} onChange={(event) => setChainId(Number(event.target.value))} disabled={busy}>{CHAINS.map((chain) => <option value={chain.id} key={chain.id}>{chain.name}</option>)}</select><ChevronDown size={15} /></div>
+              <ChainDropdown chains={CHAINS} value={chainId} onChange={setChainId} disabled={busy} />
             </label>
             <label className="token-field">
               <span>Token address</span>
@@ -270,7 +309,7 @@ function App() {
         )}
 
         {state.status === 'cancelled' && <div className="state-message"><CircleStop size={16} /><span><b>Run cancelled.</b> No partial report was submitted.</span></div>}
-        {state.report && <ReportView report={state.report} history={state.history} currentnessStatus={state.currentnessStatus} currentness={state.currentness} onRunAgain={() => submit(true)} onContinue={(cursor) => submit(true, cursor)} />}
+        {state.report && <ReportView report={state.report} history={state.history} currentnessStatus={state.currentnessStatus} currentness={state.currentness} theme={theme} onRunAgain={() => submit(true)} onContinue={(cursor) => submit(true, cursor)} />}
 
         {!state.report && !busy && state.status !== 'cancelled' && (
           <section className="method-strip" id="method">

@@ -1,5 +1,6 @@
 import { getAddress, type Address, type Hex } from 'viem'
 import type { ChainConfig } from '../config/chains'
+import { subgraphInitialCursor, subgraphQuery } from '../config/subgraphs'
 import type { PoolDescriptor, PoolReplayKind, PoolReplayReference } from '../domain/report'
 import { computePoolId } from '../adapters/uniswapV4Pool'
 
@@ -27,6 +28,12 @@ type SubgraphPool = {
   liquidity?: string
   txCount?: string
   createdAtBlockNumber: string
+  swaps?: SubgraphEventReference[]
+  modifyLiquiditys?: SubgraphEventReference[]
+}
+
+type SubgraphEventReference = {
+  transaction?: { id?: string; blockNumber?: string }
 }
 
 type SubgraphPage = {
@@ -73,6 +80,26 @@ function parseReplayTransactions(value: unknown): PoolReplayReference[] | undefi
   return [...unique.values()]
 }
 
+function subgraphReplayTransactions(pool: SubgraphPool): PoolReplayReference[] | undefined {
+  const candidates: PoolReplayReference[] = []
+  const add = (kind: PoolReplayKind, entries: SubgraphEventReference[] | undefined) => {
+    for (const entry of entries ?? []) {
+      const transactionHash = entry.transaction?.id as Hex | undefined
+      const blockNumber = entry.transaction?.blockNumber
+      if (!transactionHash || !blockNumber || !TRANSACTION_HASH.test(transactionHash)) continue
+      try {
+        BigInt(blockNumber)
+        candidates.push({ kind, transactionHash, blockNumber })
+      } catch {
+        // A malformed optional replay reference does not invalidate pool discovery.
+      }
+    }
+  }
+  add('swap', pool.swaps)
+  add('modify-liquidity', pool.modifyLiquiditys)
+  return parseReplayTransactions(candidates.length ? candidates : undefined)
+}
+
 function parsePool(value: unknown, token: Address): PoolDescriptor {
   if (!value || typeof value !== 'object') throw new Error('Pool index contains a non-object pool.')
   const pool = value as Record<string, unknown>
@@ -93,7 +120,9 @@ function parsePool(value: unknown, token: Address): PoolDescriptor {
     hook,
     initializedAtBlock: String(pool.initializedAtBlock ?? pool.createdAtBlockNumber),
     transactionHash: typeof pool.transactionHash === 'string' ? pool.transactionHash as Hex : undefined,
-    replayTransactions: parseReplayTransactions(pool.replayTransactions),
+    replayTransactions: pool.replayTransactions === undefined
+      ? subgraphReplayTransactions(pool as unknown as SubgraphPool)
+      : parseReplayTransactions(pool.replayTransactions),
     liquidity: pool.liquidity === undefined ? undefined : String(pool.liquidity),
     activity: Math.max(0, Number(pool.activity ?? pool.txCount ?? 0) || 0),
   } satisfies PoolDescriptor
@@ -130,27 +159,82 @@ async function fetchStaticIndex(input: {
   })
   if (response.status === 404) return
   if (!response.ok) throw new Error(`Pool index returned HTTP ${response.status}.`)
-  const document = await response.json() as PoolIndexDocument
+  const body = await response.text()
+  const document = JSON.parse(body) as PoolIndexDocument
   if (document.schemaVersion !== '1') throw new Error('Pool index schema version is unsupported.')
   if (document.chainId !== chain.id) throw new Error('Pool index chain identity does not match the selected chain.')
   if (getAddress(document.poolManager) !== chain.poolManager) throw new Error('Pool index PoolManager identity does not match the chain registry.')
   if (getAddress(document.token) !== token) throw new Error('Pool index token identity does not match the scan request.')
   const indexedThroughBlock = BigInt(document.indexedThroughBlock)
   const pools = document.pools.map((pool) => parsePool(pool, token))
-  return { pools, indexedThroughBlock, requests: 1, source: 'static-index', limitations: [] }
+  const manifest = await verifyAgainstManifest({ chain, token, body, signal, fetcher })
+  return {
+    pools,
+    indexedThroughBlock,
+    requests: 1 + manifest.requests,
+    source: 'static-index',
+    limitations: manifest.limitations,
+  }
 }
 
-const SUBGRAPH_QUERY = `
-  query HookscopePools($token: String!, $first: Int!, $cursor0: ID!, $cursor1: ID!) {
-    token0Pools: pools(first: $first, orderBy: id, orderDirection: asc, where: { token0: $token, id_gt: $cursor0 }) {
-      id token0 { id } token1 { id } feeTier tickSpacing hooks liquidity txCount createdAtBlockNumber
-    }
-    token1Pools: pools(first: $first, orderBy: id, orderDirection: asc, where: { token1: $token, id_gt: $cursor1 }) {
-      id token0 { id } token1 { id } feeTier tickSpacing hooks liquidity txCount createdAtBlockNumber
-    }
-    _meta { block { number } hasIndexingErrors }
+/** `sha256:<hex>` over the exact document bytes, matching the generator's checksum. */
+async function documentChecksum(body: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
+  const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `sha256:${hex}`
+}
+
+/**
+ * Confirms the served token shard is the one the published manifest committed to.
+ *
+ * The manifest pins each document's checksum, so verifying it here means a
+ * substituted or truncated shard is rejected before its PoolIds are trusted.
+ * A manifest that is absent or unreadable is a visible limitation, never a
+ * silent pass: the document's own identity checks have already run.
+ */
+async function verifyAgainstManifest(input: {
+  chain: ChainConfig
+  token: Address
+  body: string
+  signal?: AbortSignal
+  fetcher: PoolIndexFetch
+}): Promise<{ requests: number; limitations: string[] }> {
+  const template = input.chain.poolIndexUrl
+  if (!template || !template.includes('{token}')) {
+    return { requests: 0, limitations: ['The pool index URL has no token placeholder, so its manifest checksum was not verified.'] }
   }
-`
+  const manifestUrl = resolveTemplate(template, input.chain, input.token).replace(/[^/]+$/, 'manifest.json')
+  try {
+    const response = await input.fetcher(manifestUrl, { signal: input.signal, headers: { accept: 'application/json' } })
+    if (!response.ok) {
+      return { requests: 1, limitations: [`The pool-index manifest returned HTTP ${response.status}, so the served shard checksum was not verified.`] }
+    }
+    const manifest = await response.json() as {
+      schemaVersion?: string
+      chainId?: number
+      documents?: { token?: string; checksum?: string }[]
+    }
+    if (manifest.schemaVersion !== '1' || manifest.chainId !== input.chain.id) {
+      return { requests: 1, limitations: ['No matching pool-index manifest was published for this chain, so the served shard checksum was not verified.'] }
+    }
+    const entry = manifest.documents?.find((item) => item.token?.toLowerCase() === input.token.toLowerCase())
+    if (!entry?.checksum) {
+      return { requests: 1, limitations: ['The pool-index manifest does not list this token document, so its checksum was not verified.'] }
+    }
+    // Only a published-and-disagreeing checksum is fatal: it means the served
+    // document is not the one the index publisher committed to.
+    const actual = await documentChecksum(input.body)
+    if (actual !== entry.checksum.toLowerCase()) {
+      throw new Error('The served pool-index document does not match its published manifest checksum.')
+    }
+    return { requests: 1, limitations: [] }
+  } catch (error) {
+    if (input.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+    if (error instanceof Error && error.message.includes('published manifest checksum')) throw error
+    return { requests: 1, limitations: ['The pool-index manifest was unreachable, so the served shard checksum was not verified.'] }
+  }
+}
+
 
 async function fetchSubgraphIndex(input: {
   chain: ChainConfig
@@ -163,8 +247,10 @@ async function fetchSubgraphIndex(input: {
   const unique = new Map<string, PoolDescriptor>()
   const pageSize = 1_000
   const pageCeiling = 50
-  let cursor0 = ''
-  let cursor1 = ''
+  // `id` is `ID` in one published schema and `Bytes` in the other.
+  const schema = chain.subgraphSchema ?? 'pool-entities'
+  let cursor0 = subgraphInitialCursor(schema)
+  let cursor1 = subgraphInitialCursor(schema)
   let indexedThroughBlock = 0n
   let requests = 0
   let hasIndexingErrors = false
@@ -176,7 +262,7 @@ async function fetchSubgraphIndex(input: {
       signal,
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify({
-        query: SUBGRAPH_QUERY,
+        query: subgraphQuery(schema),
         variables: { token: token.toLowerCase(), first: pageSize, cursor0, cursor1 },
       }),
     })

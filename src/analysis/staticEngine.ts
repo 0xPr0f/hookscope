@@ -1,6 +1,5 @@
 import { abiFromBytecode, selectorsFromBytecode } from '@shazow/whatsabi'
 import type { EvmoleContractInfo } from 'evmole'
-import { Contract } from 'sevm'
 import { toFunctionSelector, type Hex } from 'viem'
 import { decodeHookPermissions, HOOK_FLAGS } from '../domain/hooks'
 import type { ContractNode, Evidence, StaticAnalysisResult, StaticSubject } from '../domain/report'
@@ -256,16 +255,124 @@ function analyzeHookSurface(subject: StaticSubject, selectors: Hex[], bytecodeSi
   ]
 }
 
-function normalizeOpcodes(
-  disassembled: [number, string][] | undefined,
-  sevmMnemonics: { pc: number; mnemonic: string }[],
-): OpcodeRecord[] {
+/**
+ * Evidence derived from EVMole facts the opcode scan cannot produce.
+ *
+ * The opcode pass can say "this contract writes storage somewhere"; EVMole
+ * resolves which selector writes which slot, what each entrypoint's mutability
+ * is, which compiler emitted the code, and where the control flow stops being
+ * statically resolvable. Reporting those separately keeps a decoded fact from
+ * being presented as a reachability inference.
+ */
+function analyzeContractSurface(subject: StaticSubject, info: EvmoleContractInfo): Evidence[] {
+  const findings: Evidence[] = []
+  const functions = info.functions ?? []
+
+  const payable = functions.filter((fn) => fn.stateMutability === 'payable')
+  if (payable.length) {
+    findings.push(evidence(subject, {
+      detectorId: 'evmole-payable-entrypoints',
+      severity: 'medium',
+      evidenceClass: 'deterministic-fact',
+      title: 'Contract accepts native value on specific entrypoints',
+      claim: `${payable.length} entrypoint(s) are payable: ${payable.map((fn) => normalizeSelector(fn.selector)).join(', ')}. Native value sent to any other selector reverts.`,
+      confidence: 'confirmed',
+      reproducibility: 'not-applicable',
+      technical: {
+        payable: payable.map((fn) => ({ selector: normalizeSelector(fn.selector), arguments: fn.arguments, dispatch: fn.dispatch })),
+      },
+    }))
+  }
+
+  const fallbackDispatched = functions.filter((fn) => fn.dispatch === 'fallback')
+  if (fallbackDispatched.length) {
+    findings.push(evidence(subject, {
+      detectorId: 'evmole-fallback-dispatch',
+      severity: 'low',
+      evidenceClass: 'deterministic-fact',
+      title: 'Entrypoints reachable only through fallback dispatch',
+      claim: `${fallbackDispatched.length} selector(s) are not handled by the ordinary ABI dispatcher and are reached through fallback logic, which ABI-only inspection does not reveal.`,
+      confidence: 'confirmed',
+      reproducibility: 'not-applicable',
+      technical: { selectors: fallbackDispatched.map((fn) => normalizeSelector(fn.selector)) },
+    }))
+  }
+
+  // Which selector writes which slot: a decoded fact, not an inference.
+  const writers = (records: typeof info.storage, kind: 'persistent' | 'transient') => {
+    const written = (records ?? []).filter((record) => record.writes.length > 0)
+    if (!written.length) return
+    findings.push(evidence(subject, {
+      detectorId: `evmole-${kind}-storage-writers`,
+      severity: kind === 'transient' ? 'medium' : 'low',
+      evidenceClass: 'deterministic-fact',
+      title: kind === 'transient'
+        ? 'Transient storage slots and their writers mapped'
+        : 'Persistent storage slots and their writers mapped',
+      claim: `${written.length} ${kind} slot(s) are written by decoded entrypoints: ${written.slice(0, 6).map((record) => `slot ${record.slot} (${record.type}) by ${record.writes.map(normalizeSelector).join('/')}`).join('; ')}${written.length > 6 ? '; …' : ''}.`,
+      confidence: 'confirmed',
+      reproducibility: 'not-applicable',
+      storage: written.slice(0, 32).map((record) => ({ slot: `0x${record.slot}` as Hex })),
+      technical: {
+        slots: written.slice(0, 32).map((record) => ({
+          slot: record.slot,
+          offset: record.offset,
+          type: record.type,
+          writes: record.writes.map(normalizeSelector),
+          reads: record.reads.map(normalizeSelector),
+        })),
+      },
+    }))
+  }
+  writers(info.storage, 'persistent')
+  writers(info.transientStorage, 'transient')
+
+  const solc = info.metadata?.entries.find((entry) => entry.key === 'solc')
+  if (solc) {
+    // CBOR encodes the version as three bytes; a string entry is passed through.
+    const version = solc.value.type === 'bytes'
+      ? (solc.value.value.match(/.{2}/g) ?? []).map((byte) => parseInt(byte, 16)).join('.')
+      : String(solc.value.value)
+    findings.push(evidence(subject, {
+      detectorId: 'evmole-embedded-compiler',
+      severity: 'info',
+      evidenceClass: 'deterministic-fact',
+      title: 'Compiler identity embedded in deployed bytecode',
+      claim: `The trailing CBOR metadata records solc ${version}. This is read from the deployed code itself, so it is independent of any verification service.`,
+      confidence: 'confirmed',
+      reproducibility: 'not-applicable',
+      technical: {
+        solc: version,
+        entries: info.metadata?.entries.map((entry) => ({ key: entry.key, type: entry.value.type })),
+      },
+    }))
+  }
+
+  const dynamicJumps = (info.controlFlowGraph?.blocks ?? []).filter((block) => {
+    const value: unknown = block
+    const type = value instanceof Map ? value.get('type') : (value as { type?: unknown }).type
+    return typeof type === 'string' && type.startsWith('DynamicJump')
+  })
+  if (dynamicJumps.length) {
+    findings.push(evidence(subject, {
+      detectorId: 'evmole-unresolved-control-flow',
+      severity: 'low',
+      evidenceClass: 'static-reachability',
+      title: 'Control flow contains computed jumps',
+      claim: `${dynamicJumps.length} block(s) end in a computed jump whose destination is not statically fixed, so static reachability under-approximates this contract. Concrete execution remains authoritative.`,
+      confidence: 'supported',
+      reproducibility: 'not-applicable',
+      technical: { dynamicJumpBlocks: dynamicJumps.length, totalBlocks: info.controlFlowGraph?.blocks.length ?? 0 },
+    }))
+  }
+
+  return findings
+}
+
+function normalizeOpcodes(disassembled: [number, string][] | undefined): OpcodeRecord[] {
   const byPc = new Map<number, OpcodeRecord>()
   for (const [pc, raw] of disassembled ?? []) {
     byPc.set(pc, { pc, raw, mnemonic: raw.split(' ', 1)[0] ?? raw })
-  }
-  for (const opcode of sevmMnemonics) {
-    if (!byPc.has(opcode.pc)) byPc.set(opcode.pc, { ...opcode, raw: opcode.mnemonic })
   }
   return [...byPc.values()].sort((a, b) => a.pc - b.pc)
 }
@@ -277,12 +384,12 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
   let branches = 0
   const availability: StaticAnalysisResult['engineAvailability'] = {
     whatsabi: { available: true },
-    sevm: { available: true },
     evmole: { available: true },
   }
 
   for (const subject of subjects) {
     let selectors: Hex[] = []
+    let contractInfo: EvmoleContractInfo | undefined
     let disassembled: [number, string][] = []
     let storageCount = 0
     let transientStorageCount = 0
@@ -300,6 +407,7 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
         controlFlowGraph: true,
         metadata: true,
       })
+      contractInfo = info
       disassembled = info.disassembled ?? []
       selectors = (info.functions ?? []).map((fn) => normalizeSelector(fn.selector))
       storageCount = info.storage?.length ?? 0
@@ -319,15 +427,6 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
       availability.evmole = { available: false, detail: error instanceof Error ? error.message : String(error) }
     }
 
-    let sevmOpcodes: { pc: number; mnemonic: string }[] = []
-    try {
-      const contract = new Contract(subject.bytecode)
-      sevmOpcodes = contract.opcodes().map((opcode) => ({ pc: opcode.pc, mnemonic: opcode.mnemonic }))
-      paths = Math.max(paths, contract.blocks.size)
-    } catch (error) {
-      availability.sevm = { available: false, detail: error instanceof Error ? error.message : String(error) }
-    }
-
     try {
       selectors = [...new Set([...selectors, ...selectorsFromBytecode(subject.bytecode).map(normalizeSelector)])]
       // Running ABI inference is part of the feasibility gate even when the report only stores selectors.
@@ -336,10 +435,11 @@ export function analyzeStaticSubjects(subjects: StaticSubject[]): StaticAnalysis
       availability.whatsabi = { available: false, detail: error instanceof Error ? error.message : String(error) }
     }
 
-    const opcodes = normalizeOpcodes(disassembled, sevmOpcodes)
+    const opcodes = normalizeOpcodes(disassembled)
     findings.push(...analyzeRules(subject, opcodes))
     const bytecodeSize = Math.max(0, (subject.bytecode.length - 2) / 2)
     findings.push(...analyzeHookSurface(subject, selectors, bytecodeSize))
+    if (contractInfo) findings.push(...analyzeContractSurface(subject, contractInfo))
     nodes.push({
       address: subject.address,
       role: subject.role,

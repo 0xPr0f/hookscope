@@ -34,6 +34,8 @@ const replayResult: ForkReplayResult = {
     storageOperations: [],
     calls: [{ caller: ACTOR, target: HOOK, bytecodeAddress: HOOK, scheme: 'Call', value: '0', inputLength: 4 }],
     storageDiffs: [],
+    balanceChanges: [],
+    logs: [],
     logCount: 0,
     selfdestructs: [],
     truncated: false,

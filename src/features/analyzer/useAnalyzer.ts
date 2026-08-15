@@ -3,6 +3,8 @@ import { getAddress, type Address, type Hex, type PublicClient } from 'viem'
 import { runStaticWorker } from '../../analysis/staticWorkerClient'
 import {
   ForkExecutionSession,
+  ForkExplorationSession,
+  runForkReplay,
   runParallelRevmExploration,
   runRevmProof,
   type ForkReplayResult,
@@ -10,15 +12,26 @@ import {
   type RevmExploration,
 } from '../../analysis/revmProof'
 import { runLivePoolReplays, type LivePoolReplayCoverage } from '../../analysis/livePoolReplay'
-import { runLivePoolScenarios, type LivePoolScenarioCoverage } from '../../analysis/livePoolScenarios'
 import { runLiveRouterScenarios, type LiveRouterScenarioCoverage } from '../../analysis/liveRouterScenarios'
+import { runLiveForkExploration, type LiveForkExplorationCoverage } from '../../analysis/liveForkExploration'
+import { runProtocolScenarios, type ProtocolScenarioCoverage } from '../../analysis/protocolScenarioRunner'
+import { runProtocolScenarioExploration, type ProtocolExplorationCoverage } from '../../analysis/protocolScenarioExploration'
+import { scenarioHarnessIdentity } from '../../analysis/protocolScenarioArtifact'
 import { runVerifiedSourceAnalysis, type SourceAnalysisCoverage } from '../../analysis/liveSourceAnalysis'
 import { getChainConfig } from '../../config/chains'
 import { loadScanSources } from '../../data/loadScan'
 import { loadReports, persistCompletedReport } from '../../data/reports'
 import { validateCompletedReportCurrentness, type CompletedReportCurrentness } from '../../data/reportCurrentness'
 import { getPublicClient } from '../../data/rpc'
+import { createForkHydrationCache } from '../../data/forkHydrationCache'
 import { parseTokenAddress } from '../../domain/address'
+import { currentClientUsesStaticOnlyMobileTier } from '../../domain/executionClient'
+import {
+  ADAPTER_VERSION,
+  FIXTURE_SCENARIO_VERSION,
+  LIVE_SCENARIO_VERSION,
+  reportMatchesCurrentPipeline,
+} from '../../domain/reportPipeline'
 import type { AnalysisPhase, AnalysisReport, ContractNode, Evidence, PoolDescriptor, StaticSubject } from '../../domain/report'
 import type { HackenSuiteResult } from '../../analysis/hackenScenarios'
 import {
@@ -47,6 +60,7 @@ const phaseLabels: Record<AnalysisPhase['id'], string> = {
   resolve: 'Resolve contracts',
   static: 'Map bytecode behavior',
   replay: 'Replay transactions',
+  generated: 'Run generated scenarios',
   scenarios: 'Run pool scenarios',
   fuzz: 'Explore bounded inputs',
   report: 'Normalize evidence',
@@ -59,6 +73,11 @@ const basePhases = (): AnalysisPhase[] => Object.entries(phaseLabels).map(([id, 
   completed: 0,
   total: 1,
 }))
+
+function phaseCoverageDetail(detail: string, status: 'passed' | 'degraded', limitations: string[]) {
+  const reason = status === 'degraded' ? limitations[0] : undefined
+  return reason ? `${detail} · ${reason}` : detail
+}
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address
 const FIXTURE_CALLER = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' as Address
@@ -192,6 +211,57 @@ function explorationFinding(exploration: RevmExploration | undefined, affectedPo
   }
 }
 
+/** Progress is counted in pools, since a pool owns one generated scenario suite. */
+function protocolScenarioPhase(
+  coverage: ProtocolScenarioCoverage,
+): Pick<AnalysisPhase, 'status' | 'completed' | 'total' | 'detail'> {
+  return {
+    status: coverage.status === 'passed' ? 'completed' : 'degraded',
+    completed: coverage.completed,
+    total: coverage.scenarios,
+    detail: phaseCoverageDetail(
+      `${coverage.executedPools}/${coverage.eligiblePools} hooked pools · ${coverage.completed} completed · ${coverage.reverted} observed reverts · ${coverage.hydrationReads} logical pinned reads`,
+      coverage.status,
+      coverage.limitations,
+    ),
+  }
+}
+
+/**
+ * Summarizes both exploration suites in one phase.
+ *
+ * They are reported side by side rather than merged: the generated suite needs
+ * only a pool, the historical suite needs a receipt-matched router transaction,
+ * and collapsing them would let one suite's absence read as the other's failure.
+ */
+function explorationPhase(
+  generated: ProtocolExplorationCoverage | undefined,
+  historical: LiveForkExplorationCoverage | undefined,
+  historicalReason: string,
+): Pick<AnalysisPhase, 'status' | 'completed' | 'total' | 'detail'> {
+  if (!generated && !historical) {
+    return { status: 'degraded', completed: 0, total: 1, detail: `No bounded exploration ran · ${historicalReason}` }
+  }
+  const parts = [
+    generated
+      ? `generated: ${generated.exploredPools}/${generated.eligiblePools} pools · ${generated.executions.toLocaleString()} executions · ${generated.coverageEdges} edges`
+      : 'generated: unavailable',
+    historical
+      ? `historical router: ${historical.exploredPools}/${historical.eligiblePools} pools · ${historical.executions.toLocaleString()} executions · ${historical.coverageEdges} edges`
+      : `historical router: unavailable · ${historicalReason}`,
+  ]
+  const limitations = [...(generated?.limitations ?? []), ...(historical?.limitations ?? [])]
+  // The generated suite decides the phase: it is the one that runs on nothing
+  // more than a discovered pool, so its status is the honest floor.
+  const status = generated?.status ?? 'degraded'
+  return {
+    status: status === 'passed' && historical?.status === 'passed' ? 'completed' : 'degraded',
+    completed: (generated?.exploredPools ?? 0) + (historical?.exploredPools ?? 0),
+    total: Math.max(1, (generated?.eligiblePools ?? 0) + (historical?.eligiblePools ?? 0)),
+    detail: phaseCoverageDetail(parts.join(' · '), status, limitations),
+  }
+}
+
 function fixtureHydrationFinding(replay: ForkReplayResult, affectedPool?: Hex): Evidence {
   return {
     id: 'revm-fixture-hydration-loop',
@@ -253,10 +323,12 @@ export function useAnalyzer() {
     }
 
     const chain = getChainConfig(input.chainId)
+    const isFixture = token.toLowerCase() === FIXTURE_SCAN_ADDRESS.toLowerCase()
     setState({ status: 'cache', detail: 'Checking completed reports', progress: 0, phases: basePhases(), history: [] })
     const cached = await loadReports(chain.id, token)
     const newest = cached[0]
-    if (newest && !input.force && !input.poolCursor) {
+    const cacheMatchesCurrentPipeline = newest ? reportMatchesCurrentPipeline(newest, isFixture) : false
+    if (newest && cacheMatchesCurrentPipeline && !input.force && !input.poolCursor) {
       if (newest.blockTagPolicy === 'deterministic-fixture') {
         setState({ status: 'completed', progress: 100, phases: newest.phases, report: newest, history: cached.slice(1) })
         return
@@ -323,8 +395,6 @@ export function useAnalyzer() {
       let hasMore = false
       let nextCursor: string | undefined
       let tokenSymbol: string | undefined
-      const isFixture = token.toLowerCase() === FIXTURE_SCAN_ADDRESS.toLowerCase()
-
       patchPhase('pin', { status: 'running' })
       if (isFixture) {
         const fixture = syntheticSources()
@@ -405,7 +475,7 @@ export function useAnalyzer() {
           : `${subjects.length} bytecode identities · no verified source bundle selected`,
       })
 
-      const mobile = matchMedia('(max-width: 720px)').matches
+      const mobile = currentClientUsesStaticOnlyMobileTier()
       const executionReason = mobile
         ? 'Mobile v1 provides discovery and static behavior mapping only.'
         : chain.deepExecution
@@ -414,8 +484,13 @@ export function useAnalyzer() {
       let executionProof: RevmExecutionProof | undefined
       let exploration: RevmExploration | undefined
       let liveReplay: LivePoolReplayCoverage | undefined
-      let liveScenarios: LivePoolScenarioCoverage | undefined
       let liveRouterScenarios: LiveRouterScenarioCoverage | undefined
+      let liveForkExploration: LiveForkExplorationCoverage | undefined
+      let protocolScenarios: ProtocolScenarioCoverage | undefined
+      let protocolExploration: ProtocolExplorationCoverage | undefined
+      let pinnedBlockContext: { timestamp: bigint; baseFeePerGas: bigint | null; gasLimit: bigint; miner: Address } | undefined
+      let historicalReplayFailure = 'Historical replay did not run.'
+      let generatedFailure: string | undefined
       let fixtureHydration: ForkReplayResult | undefined
       let fixtureReuseHydrationRequests: number | undefined
       let hackenSuite: HackenSuiteResult | undefined
@@ -523,85 +598,184 @@ export function useAnalyzer() {
         })
       } else if (!mobile && chain.deepExecution && chain.poolManager && pools.length > 0) {
         const client = getPublicClient(chain)
-        patchPhase('replay', { status: 'running', completed: 0, total: pools.length, detail: 'Validating indexed transaction contexts' })
-        setState((current) => ({ ...current, progress: 74, detail: 'Replaying pinned PoolManager transactions in revm' }))
-        liveReplay = await runLivePoolReplays({
-          scanId,
-          client,
-          chainId: chain.id,
-          poolManager: chain.poolManager,
-          pinnedBlockNumber: blockNumber,
-          pools,
-          signal: controller.signal,
-          onProgress: (completed, total, detail) => {
-            patchPhase('replay', { status: 'running', completed, total, detail })
-            setState((current) => ({ ...current, detail: `Historical replay · ${detail}` }))
-          },
-        })
-        patchPhase('replay', {
-          status: liveReplay.status === 'passed' ? 'completed' : 'degraded',
-          completed: liveReplay.passedTransactions,
-          total: liveReplay.candidateTransactions,
-          detail: `${liveReplay.coveredPools}/${liveReplay.selectedPools} pools · ${liveReplay.passedTransactions}/${liveReplay.candidateTransactions} transactions matched`,
-        })
+        const hydrationCache = createForkHydrationCache(client)
+        const poolManager = chain.poolManager
         const workerBudget = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1))
-        patchPhase('scenarios', { status: 'running', completed: 0, total: liveReplay.coveredPools, detail: 'Hydrating historical actor and router contexts' })
-        setState((current) => ({ ...current, progress: 80, detail: 'Running enabled hook callbacks in reusable pinned snapshots' }))
-        liveScenarios = await runLivePoolScenarios({
-          scanId,
-          client,
-          poolManager: chain.poolManager,
-          pools,
-          replay: liveReplay,
-          signal: controller.signal,
-          maxWorkers: workerBudget,
-          onProgress: (completed, total, detail) => {
-            patchPhase('scenarios', { status: 'running', completed, total, detail })
-            setState((current) => ({ ...current, detail: `Live callback context · ${detail}` }))
-          },
-        })
-        patchPhase('scenarios', {
-          status: liveScenarios.status === 'passed' ? 'completed' : 'degraded',
-          completed: liveScenarios.scenarios,
-          total: liveScenarios.scenarios,
-          detail: `${liveScenarios.coveredPools}/${liveScenarios.eligiblePools} hooked pools · ${liveScenarios.executions} callback executions · ${liveScenarios.hydrationReads} pinned reads`,
-        })
+
+        // 1. Historical replay. Independent and optional: it reproduces onchain
+        //    transactions, and everything below is generated, so a replay that
+        //    cannot run must degrade its own phase rather than the scan.
+        patchPhase('replay', { status: 'running', completed: 0, total: pools.length, detail: 'Validating indexed transaction contexts' })
+        setState((current) => ({ ...current, progress: 72, detail: 'Replaying pinned PoolManager transactions in revm' }))
+        try {
+          liveReplay = await runLivePoolReplays({
+            scanId,
+            client,
+            chainId: chain.id,
+            poolManager,
+            pinnedBlockNumber: blockNumber,
+            pools,
+            signal: controller.signal,
+            replay: (replayInput) => runForkReplay({
+              ...replayInput,
+              loadHydration: (request) => hydrationCache.load(replayInput.stateBlockNumber, request),
+            }),
+            onProgress: (completed, total, detail) => {
+              patchPhase('replay', { status: 'running', completed, total, detail })
+              setState((current) => ({ ...current, detail: `Historical replay · ${detail}` }))
+            },
+          })
+          patchPhase('replay', {
+            status: liveReplay.status === 'passed' ? 'completed' : 'degraded',
+            completed: liveReplay.passedTransactions,
+            total: liveReplay.candidateTransactions,
+            detail: phaseCoverageDetail(
+              `${liveReplay.coveredPools}/${liveReplay.selectedPools} pools · ${liveReplay.passedTransactions}/${liveReplay.candidateTransactions} transactions matched`,
+              liveReplay.status,
+              liveReplay.limitations,
+            ),
+          })
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          historicalReplayFailure = error instanceof Error ? error.message : String(error)
+          patchPhase('replay', { status: 'degraded', detail: `Historical replay unavailable · ${historicalReplayFailure}` })
+        }
+
+        // 2. Generated PoolManager scenarios. These need a discovered pool and
+        //    pinned reads, nothing else: not a replay result, not a recognized
+        //    router, not historical calldata, not a PositionManager attribution.
+        patchPhase('generated', { status: 'running', detail: 'Injecting the pinned scenario harness at pinned state' })
+        setState((current) => ({ ...current, progress: 78, detail: 'Executing generated PoolManager scenarios' }))
+        try {
+          const pinned = await client.getBlock({ blockNumber })
+          protocolScenarios = await runProtocolScenarios({
+            scanId,
+            client,
+            chainId: chain.id,
+            poolManager,
+            pools,
+            stateBlockNumber: blockNumber,
+            pinnedBlock: {
+              timestamp: pinned.timestamp,
+              baseFeePerGas: pinned.baseFeePerGas,
+              gasLimit: pinned.gasLimit,
+              miner: pinned.miner ?? ZERO_ADDRESS,
+            },
+            signal: controller.signal,
+            createSession: (options) => new ForkExecutionSession({
+              ...options,
+              loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
+            }),
+            onProgress: (completed, total, detail) => {
+              patchPhase('generated', { status: 'running', completed, total, detail })
+              setState((current) => ({ ...current, detail: `Generated scenarios · ${detail}` }))
+            },
+          })
+          pinnedBlockContext = {
+            timestamp: pinned.timestamp,
+            baseFeePerGas: pinned.baseFeePerGas,
+            gasLimit: pinned.gasLimit,
+            miner: pinned.miner ?? ZERO_ADDRESS,
+          }
+          patchPhase('generated', protocolScenarioPhase(protocolScenarios))
+        } catch (error) {
+          if (controller.signal.aborted) throw error
+          generatedFailure = error instanceof Error ? error.message : String(error)
+          patchPhase('generated', { status: 'degraded', detail: `Generated scenarios unavailable · ${generatedFailure}` })
+        }
+
+        // 3. Historical-router variants. Extra evidence layered on a replay that
+        //    matched its receipt, so this one legitimately depends on step 1.
         patchPhase('scenarios', { status: 'running', detail: 'Recognizing official v4 router payloads and preserving settlement commands' })
-        setState((current) => ({ ...current, progress: 84, detail: 'Running controlled official-router variants in reusable pinned snapshots' }))
-        liveRouterScenarios = await runLiveRouterScenarios({
-          scanId,
-          client,
-          poolManager: chain.poolManager,
-          pools,
-          replay: liveReplay,
-          signal: controller.signal,
-          maxWorkers: workerBudget,
-          onProgress: (completed, total, detail) => {
-            patchPhase('scenarios', {
-              status: 'running',
-              completed: liveScenarios!.scenarios + completed,
-              total: liveScenarios!.scenarios + total,
-              detail,
-            })
-            setState((current) => ({ ...current, detail: `Official router context · ${detail}` }))
-          },
-        })
-        const liveScenarioStatus = liveScenarios.status === 'passed' && liveRouterScenarios.status === 'passed' ? 'completed' : 'degraded'
-        patchPhase('scenarios', {
-          status: liveScenarioStatus,
-          completed: liveScenarios.scenarios + liveRouterScenarios.scenarios,
-          total: liveScenarios.scenarios + liveRouterScenarios.scenarios,
-          detail: `${liveScenarios.executions} callback observations · ${liveRouterScenarios.executions} controlled router variants · ${liveScenarios.hydrationReads + liveRouterScenarios.hydrationReads} pinned reads · ${liveRouterScenarios.positionLookups.resolved}/${liveRouterScenarios.positionLookups.reads} position lookups`,
-        })
-        patchPhase('fuzz', { status: 'degraded', detail: `${liveRouterScenarios.executions} controlled router variants completed; coverage-guided live fork mutation remains a later conformance gate.` })
+        setState((current) => ({ ...current, progress: 82, detail: 'Running controlled official-router variants through PoolManager' }))
+        if (liveReplay) {
+          liveRouterScenarios = await runLiveRouterScenarios({
+            scanId,
+            client,
+            poolManager,
+            pools,
+            replay: liveReplay,
+            signal: controller.signal,
+            maxWorkers: workerBudget,
+            createSession: (options) => new ForkExecutionSession({
+              ...options,
+              loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
+            }),
+            onProgress: (completed, total, detail) => {
+              patchPhase('scenarios', { status: 'running', completed, total, detail })
+              setState((current) => ({ ...current, detail: `Official router context · ${detail}` }))
+            },
+          })
+          patchPhase('scenarios', {
+            status: liveRouterScenarios.status === 'passed' ? 'completed' : 'degraded',
+            completed: liveRouterScenarios.scenarios,
+            total: liveRouterScenarios.scenarios,
+            detail: phaseCoverageDetail(
+              `${liveRouterScenarios.executions} router → PoolManager scenarios · ${liveRouterScenarios.hydrationReads} logical pinned reads · ${hydrationCache.metrics().hits} reads reused · ${liveRouterScenarios.positionLookups.resolved}/${liveRouterScenarios.positionLookups.reads} position lookups`,
+              liveRouterScenarios.status,
+              liveRouterScenarios.limitations,
+            ),
+          })
+        } else {
+          patchPhase('scenarios', { status: 'degraded', detail: `Historical-router variants need a receipt-matched replay · ${historicalReplayFailure}` })
+        }
+
+        // 4. Bounded exploration of generated calldata, seeded by step 2.
+        patchPhase('fuzz', { status: 'running', completed: 0, detail: 'Mutating masked generated scenario calldata at pinned state' })
+        setState((current) => ({ ...current, progress: 85, detail: 'Exploring masked generated inputs against pinned pool state' }))
+        if (pinnedBlockContext) {
+          protocolExploration = await runProtocolScenarioExploration({
+            scanId,
+            client,
+            chainId: chain.id,
+            poolManager,
+            pools,
+            stateBlockNumber: blockNumber,
+            pinnedBlock: pinnedBlockContext,
+            contexts: protocolScenarios?.contexts,
+            signal: controller.signal,
+            createSession: (options) => new ForkExplorationSession({
+              ...options,
+              loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
+            }),
+            onProgress: (completed, total, detail) => {
+              patchPhase('fuzz', { status: 'running', completed, total, detail })
+              setState((current) => ({ ...current, detail: `Generated exploration · ${detail}` }))
+            },
+          })
+        }
+
+        // 5. Historical-router exploration. Extra evidence, again replay-derived.
+        setState((current) => ({ ...current, progress: 88, detail: 'Exploring masked router inputs against pinned pool state' }))
+        if (liveReplay) {
+          liveForkExploration = await runLiveForkExploration({
+            scanId,
+            client,
+            poolManager,
+            pools,
+            replay: liveReplay,
+            signal: controller.signal,
+            maxWorkers: workerBudget,
+            createSession: (options) => new ForkExplorationSession({
+              ...options,
+              loadHydration: (request) => hydrationCache.load(options.stateBlockNumber, request),
+            }),
+            onProgress: (completed, total, detail) => {
+              patchPhase('fuzz', { status: 'running', completed, total, detail })
+              setState((current) => ({ ...current, detail: `Hydrated fork exploration · ${detail}` }))
+            },
+          })
+        }
+        patchPhase('fuzz', explorationPhase(protocolExploration, liveForkExploration, historicalReplayFailure))
       } else {
         patchPhase('replay', { status: 'degraded', detail: executionReason })
-        for (const phase of ['scenarios', 'fuzz'] as const) patchPhase(phase, { status: 'degraded', detail: executionReason })
+        for (const phase of ['generated', 'scenarios', 'fuzz'] as const) patchPhase(phase, { status: 'degraded', detail: executionReason })
       }
-      setState((current) => ({ ...current, progress: 88, detail: 'Normalizing evidence and capability coverage' }))
+      setState((current) => ({ ...current, progress: 92, detail: 'Normalizing evidence and capability coverage' }))
       patchPhase('report', { status: 'running' })
 
       const completedAt = new Date().toISOString()
+      const harness = scenarioHarnessIdentity()
       const finalPhases = basePhases().map((phase) => {
         if (phase.id === 'static') return {
           ...phase,
@@ -619,18 +793,35 @@ export function useAnalyzer() {
           status: liveReplay.status === 'passed' ? 'completed' as const : 'degraded' as const,
           completed: liveReplay.passedTransactions,
           total: liveReplay.candidateTransactions,
-          detail: `${liveReplay.coveredPools}/${liveReplay.selectedPools} pools · ${liveReplay.passedTransactions}/${liveReplay.candidateTransactions} transactions matched`,
+          detail: phaseCoverageDetail(
+            `${liveReplay.coveredPools}/${liveReplay.selectedPools} pools · ${liveReplay.passedTransactions}/${liveReplay.candidateTransactions} transactions matched`,
+            liveReplay.status,
+            liveReplay.limitations,
+          ),
+        }
+        if (phase.id === 'generated' && protocolScenarios) return { ...phase, ...protocolScenarioPhase(protocolScenarios) }
+        if (phase.id === 'generated' && !isFixture) return {
+          ...phase,
+          status: 'degraded' as const,
+          detail: generatedFailure ? `Generated scenarios unavailable · ${generatedFailure}` : executionReason,
         }
         if (phase.id === 'scenarios' && hackenSuite) return { ...phase, status: 'completed' as const, completed: hackenSuite.scenarios.length, total: hackenSuite.scenarios.length, detail: `${hackenSuite.executions} real PoolManager executions · ${hackenSuite.elapsedMs} ms` }
-        if (phase.id === 'scenarios' && liveScenarios) return {
+        if (phase.id === 'scenarios' && liveRouterScenarios) return {
           ...phase,
-          status: liveScenarios.status === 'passed' && liveRouterScenarios?.status === 'passed' ? 'completed' as const : 'degraded' as const,
-          completed: liveScenarios.scenarios + (liveRouterScenarios?.scenarios ?? 0),
-          total: liveScenarios.scenarios + (liveRouterScenarios?.scenarios ?? 0),
-          detail: `${liveScenarios.executions} callback observations · ${liveRouterScenarios?.executions ?? 0} controlled router variants · ${liveScenarios.hydrationReads + (liveRouterScenarios?.hydrationReads ?? 0)} pinned reads · ${liveRouterScenarios?.positionLookups.resolved ?? 0}/${liveRouterScenarios?.positionLookups.reads ?? 0} position lookups`,
+          status: liveRouterScenarios.status === 'passed' ? 'completed' as const : 'degraded' as const,
+          completed: liveRouterScenarios.scenarios,
+          total: liveRouterScenarios.scenarios,
+          detail: phaseCoverageDetail(
+            `${liveRouterScenarios.executions} router → PoolManager scenarios · ${liveRouterScenarios.hydrationReads} logical pinned reads · ${liveRouterScenarios.positionLookups.resolved}/${liveRouterScenarios.positionLookups.reads} position lookups`,
+            liveRouterScenarios.status,
+            liveRouterScenarios.limitations,
+          ),
         }
         if (phase.id === 'fuzz' && exploration) return { ...phase, status: 'completed' as const, completed: exploration.executions, total: 30_000, detail: `${exploration.coverageEdges} execution edges · ${exploration.elapsedMs} ms` }
-        if (liveReplay && phase.id === 'fuzz') return { ...phase, status: 'degraded' as const, detail: `${liveRouterScenarios?.executions ?? 0} controlled router variants completed; coverage-guided live fork mutation remains a later conformance gate.` }
+        if (phase.id === 'fuzz' && (protocolExploration || liveForkExploration)) return {
+          ...phase,
+          ...explorationPhase(protocolExploration, liveForkExploration, historicalReplayFailure),
+        }
         return { ...phase, status: 'degraded' as const, detail: executionReason }
       })
       const exploredFinding = explorationFinding(exploration, pools[0]?.poolId)
@@ -649,22 +840,33 @@ export function useAnalyzer() {
         blockTagPolicy: blockPolicy,
         createdAt: completedAt,
         elapsedMs: Math.round(performance.now() - startedAt),
-        adapterVersion: 'uniswap-v4/0.1.0',
+        adapterVersion: ADAPTER_VERSION,
         scenarioVersion: hackenSuite
           ? `${hackenSuite.version}@${hackenSuite.upstreamCommit}`
-          : liveScenarios
-            ? 'hacken-live-router-context/0.3.0'
-            : 'hacken-browser-port/0.5.0',
+          : liveRouterScenarios
+            ? LIVE_SCENARIO_VERSION
+            : FIXTURE_SCENARIO_VERSION,
         engineVersions: {
-          whatsabi: '0.15.3',
-          sevm: '0.7.4',
+          whatsabi: '0.27.0',
           evmole: '0.9.3',
           revm: '36.0.0',
           solc: sourceCoverage?.compilerVersions.join(',') || 'not-run',
           sourceRules: '0.1.0',
           hackenPort: hackenSuite?.version ?? 'not-run',
-          inputExplorer: exploration?.strategy ?? 'libafl-worker-fanout-corpus-exchange/0.2.0',
+          inputExplorer: exploration?.strategy ?? liveForkExploration?.strategy ?? 'libafl-worker-fanout-corpus-exchange/0.2.0',
           rules: '0.2.0',
+          generatedScenarios: protocolScenarios?.version ?? 'not-run',
+          generatedExplorer: protocolExploration?.strategy ?? 'not-run',
+          ...(protocolScenarios || protocolExploration
+            ? {
+                scenarioHarness: `${harness.contract}@${harness.templateHash}`,
+                scenarioHarnessSource: harness.sourceHash,
+                scenarioHarnessCompiler: harness.compiler,
+                uniswapV4Core: harness.uniswapCore,
+                uniswapV4Periphery: harness.uniswapPeriphery,
+                poolManagerStorageLayout: harness.poolManagerStorageLayout,
+              }
+            : {}),
         },
         capabilities: {
           discovery: { supported: true, status: 'passed', verifiedAt: completedAt },
@@ -678,9 +880,24 @@ export function useAnalyzer() {
                 ? { supported: true, status: 'passed', verifiedAt: completedAt }
                 : { supported: true, status: 'degraded', reason: liveReplay.limitations.join(' ') || 'Historical replay coverage was incomplete.' }
             : { supported: false, status: 'degraded', reason: executionReason },
+          generated: protocolScenarios
+            ? protocolScenarios.status === 'passed'
+              ? { supported: true, status: 'passed', verifiedAt: completedAt }
+              : { supported: true, status: 'degraded', reason: protocolScenarios.limitations[0] ?? 'Generated scenario coverage was incomplete.' }
+            : { supported: false, status: 'degraded', reason: generatedFailure ?? executionReason },
           fuzz: exploration
             ? { supported: true, status: 'passed', verifiedAt: completedAt }
-            : { supported: false, status: 'degraded', reason: liveReplay ? `${liveRouterScenarios?.executions ?? 0} controlled official-router variants completed; coverage-guided mutation of the hydrated live fork is not yet enabled.` : executionReason },
+            : protocolExploration || liveForkExploration
+              ? protocolExploration?.status === 'passed' && liveForkExploration?.status === 'passed'
+                ? { supported: true, status: 'passed', verifiedAt: completedAt }
+                : {
+                    supported: true,
+                    status: 'degraded',
+                    reason: protocolExploration?.limitations[0]
+                      ?? liveForkExploration?.limitations[0]
+                      ?? 'Coverage-guided exploration did not cover every hooked pool.',
+                  }
+              : { supported: false, status: 'degraded', reason: executionReason },
         },
         pools,
         poolCoverage: { discovered, analyzed: pools.length, hasMore, nextCursor },
@@ -692,31 +909,38 @@ export function useAnalyzer() {
           ...(fixtureHydration ? [fixtureHydrationFinding(fixtureHydration, pools[0]?.poolId)] : []),
           ...hackenEvidence,
           ...(liveReplay?.findings ?? []),
-          ...(liveScenarios?.findings ?? []),
+          ...(protocolScenarios?.findings ?? []),
           ...(liveRouterScenarios?.findings ?? []),
+          ...(protocolExploration?.findings ?? []),
+          ...(liveForkExploration?.findings ?? []),
           ...(exploredFinding ? [exploredFinding] : []),
         ],
         phases: finalPhases,
         scenarios: hackenSuite
           ? { completed: hackenSuite.scenarios.length, total: hackenSuite.scenarios.length }
-          : liveScenarios
-            ? { completed: liveScenarios.scenarios + (liveRouterScenarios?.scenarios ?? 0), total: liveScenarios.scenarios + (liveRouterScenarios?.scenarios ?? 0) }
+          : protocolScenarios || liveRouterScenarios
+            ? {
+                completed: (protocolScenarios?.completed ?? 0) + (liveRouterScenarios?.scenarios ?? 0),
+                total: (protocolScenarios?.scenarios ?? 0) + (liveRouterScenarios?.scenarios ?? 0),
+              }
             : { completed: 0, total: 0 },
         coverage: {
           uniqueCodeHashes: subjects.length,
           paths: staticResult.paths,
-          executions: (executionProof ? 1 : 0) + (liveReplay?.passedTransactions ?? 0) + (liveScenarios?.executions ?? 0) + (liveRouterScenarios?.executions ?? 0) + (hackenSuite?.executions ?? 0) + (exploration?.executions ?? 0),
+          executions: (executionProof ? 1 : 0) + (liveReplay?.passedTransactions ?? 0) + (liveRouterScenarios?.executions ?? 0) + (hackenSuite?.executions ?? 0) + (exploration?.executions ?? 0) + (liveForkExploration?.executions ?? 0) + (protocolScenarios?.completed ?? 0) + (protocolExploration?.executions ?? 0),
           branches: staticResult.branches,
         },
         limitations: [
           ...limitations,
           ...(isFixture && !mobile
             ? ['This deterministic example validates the browser engines; public-chain fork execution still requires per-chain conformance.']
-            : liveReplay
+            : liveReplay || protocolScenarios || protocolExploration
               ? [
-                  ...liveReplay.limitations,
-                  ...(liveScenarios?.limitations ?? []),
+                  ...(liveReplay?.limitations ?? [`Historical replay did not run · ${historicalReplayFailure}`]),
+                  ...(protocolScenarios?.limitations ?? []),
                   ...(liveRouterScenarios?.limitations ?? []),
+                  ...(protocolExploration?.limitations ?? []),
+                  ...(liveForkExploration?.limitations ?? []),
                 ]
             : [executionReason]),
         ],

@@ -15,6 +15,15 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   await page.getByRole('button').filter({ hasText: 'Inputs produce different state outcomes' }).click()
   await expect(page.getByText(/libafl-worker-fanout-corpus-exchange\/0.2.0/)).toBeVisible()
   await expect(page.getByTitle(/cold reads · 0 warm reads/)).toBeVisible()
+
+  // The three PoolManager suites must stay visibly separate, each reporting its
+  // own result, so a skipped suite can never read as another suite's outcome.
+  await page.getByRole('tab', { name: /Tests/ }).click()
+  for (const suite of ['HackenBrowserPort', 'GeneratedPoolManagerScenarios', 'LivePoolManagerScenarios']) {
+    await expect(page.getByRole('heading', { name: suite, exact: true })).toBeVisible()
+  }
+  await expect(page.getByLabel('GeneratedPoolManagerScenarios scenario output')).toContainText('SKIP')
+  await expect(page.getByLabel('HackenBrowserPort scenario output')).toContainText('Suite result: OK')
 })
 
 test('rejects the supplied malformed address before starting workers', async ({ page }) => {

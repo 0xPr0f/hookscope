@@ -8,17 +8,25 @@ export type RevmCallEvidence = {
   scheme: string
   value: string
   inputLength: number
+  /** Absent when the call input lived in the shared interpreter buffer. */
+  selector?: Hex
 }
 export type RevmStorageDiff = { address: string; slot: Hex; before: Hex; after: Hex }
+/** A storage-family opcode with the key it addressed; `value` is present for writes. */
+export type RevmStorageAccess = RevmStepEvidence & { slot?: Hex; value?: Hex }
+export type RevmLogEvidence = { address: string; topics: Hex[]; data: Hex }
+export type RevmBalanceChange = { address: string; before: string; after: string }
 export type RevmExecutionProof = {
   engine: string
   success: boolean
   gasUsed: number
   output: Hex
   steps: RevmStepEvidence[]
-  storageOperations: RevmStepEvidence[]
+  storageOperations: RevmStorageAccess[]
   calls: RevmCallEvidence[]
   storageDiffs: RevmStorageDiff[]
+  balanceChanges: RevmBalanceChange[]
+  logs: RevmLogEvidence[]
   logCount: number
   selfdestructs: [string, string, string][]
   truncated: boolean
@@ -133,6 +141,9 @@ export type ForkSessionMetrics = {
   rpcReads: number
   executions: number
 }
+
+/** An exploration session counts pinned reads; it does not own the execution counters a replay session reports. */
+export type ForkExplorationMetrics = Pick<ForkSessionMetrics, 'rpcReads' | 'hydratedAccounts' | 'hydratedStorageSlots'>
 
 function serializedTransaction(input: ForkReplayTransaction) {
   return {
@@ -291,7 +302,7 @@ export type ParallelRevmExploration = RevmExploration & {
   }[]
 }
 
-function witnessOutcomeIdentity(witness: RevmExplorationWitness) {
+export function witnessOutcomeIdentity(witness: RevmExplorationWitness) {
   const storage = witness.storageDiffs
     .map((diff) => `${diff.address.toLowerCase()}:${diff.slot.toLowerCase()}:${diff.after.toLowerCase()}`)
     .sort()
@@ -718,7 +729,7 @@ export class ForkExplorationSession {
     })
   }
 
-  metrics() {
+  metrics(): ForkExplorationMetrics {
     return { rpcReads: this.rpcReads, hydratedAccounts: this.hydratedAccounts, hydratedStorageSlots: this.hydratedStorageSlots }
   }
 

@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Wasm artifacts under src/wasm are generated and untracked, so every lane
+  # that builds or runs the browser bundle has to produce them first.
+  RUST_TOOLCHAIN: 1.88.0
+
+jobs:
+  browser:
+    name: Browser engines and bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm wasm:build
+      - run: pnpm test
+      - run: pnpm build
+      - run: node scripts/validate-deployment.mjs
+
+  native-oracle:
+    name: Native revm and Foundry oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: pnpm install --frozen-lockfile
+      # Both feature configurations: the default build must stay green so the
+      # inspector tests are not silently gated behind the fuzz feature.
+      - run: pnpm test:rust
+      - run: pnpm test:foundry
+      # The checked-in harness manifest is exactly what a browser injects into a
+      # user's fork, so a drift between it and the pinned compiler build has to
+      # fail here rather than surface as a wrong claim in a report.
+      - run: node scripts/generate-protocol-scenario-artifact.mjs
+      - run: git diff --exit-code src/fixtures/generated/protocol-scenario-router.json
+
+  e2e:
+    name: End-to-end browser matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm wasm:build
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  supply-chain:
+    name: SBOM, licenses, and pinned versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/check-supply-chain.mjs
+      - run: pnpm licenses list --json > sbom-licenses.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-licenses.json
+          retention-days: 30

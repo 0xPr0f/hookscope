@@ -106,7 +106,7 @@ export const contractNodeSchema = z.object({
 })
 
 export const phaseSchema = z.object({
-  id: z.enum(['pin', 'discover', 'resolve', 'static', 'replay', 'scenarios', 'fuzz', 'report']),
+  id: z.enum(['pin', 'discover', 'resolve', 'static', 'replay', 'generated', 'scenarios', 'fuzz', 'report']),
   label: z.string(),
   status: z.enum(['pending', 'running', 'completed', 'degraded', 'cancelled', 'failed']),
   completed: z.number().int().nonnegative(),
@@ -137,6 +137,8 @@ export const analysisReportSchema = z.object({
     discovery: capabilityStateSchema,
     static: capabilityStateSchema,
     replay: capabilityStateSchema,
+    // Optional so a report stored before generated scenarios existed still parses.
+    generated: capabilityStateSchema.optional(),
     fuzz: capabilityStateSchema,
   }),
   pools: z.array(poolSchema).max(20),

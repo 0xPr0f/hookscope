@@ -3,7 +3,7 @@ use super::{
     coverage_index, outcome_fingerprint, register_libafl_types, ExplorationWitness,
     FUZZ_COVERAGE_MAP_SIZE, MAX_FUZZ_INPUT_BYTES,
 };
-use super::{state_diffs, EvidenceInspector, ExecutionProof};
+use super::{balance_changes, state_diffs, EvidenceInspector, ExecutionProof};
 #[cfg(feature = "libafl-fuzz")]
 use libafl::{
     corpus::InMemoryCorpus,
@@ -437,6 +437,7 @@ fn run_database(
     };
     let result = result_and_state.result;
     let storage_diffs = state_diffs(&result_and_state.state);
+    let balance_changes = balance_changes(&result_and_state.state);
     if commit {
         database
             .0
@@ -456,6 +457,8 @@ fn run_database(
             storage_operations: inspector.storage_operations,
             calls: inspector.calls,
             storage_diffs,
+            balance_changes,
+            logs: inspector.logs,
             log_count: inspector.log_count,
             selfdestructs: inspector.selfdestructs,
             truncated: inspector.truncated,

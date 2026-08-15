@@ -20,6 +20,7 @@ const CURRENCY1 = '0x1111111111111111111111111111111111111111' as Address
 const HOOK = '0x2222222222222222222222222222222222222222' as Address
 const ACTOR = '0x3333333333333333333333333333333333333333' as Address
 const ROUTER = '0x4444444444444444444444444444444444444444' as Address
+const POSITION_MANAGER = '0x7777777777777777777777777777777777777777' as Address
 const MANAGER = '0x5555555555555555555555555555555555555555' as Address
 const ZERO_BYTES32 = `0x${'0'.repeat(64)}` as Hex
 
@@ -140,6 +141,8 @@ function replayResult(success = true): ForkReplayResult {
       storageOperations: [],
       calls: [],
       storageDiffs: [],
+      balanceChanges: [],
+      logs: [],
       logCount: 0,
       selfdestructs: [],
       truncated: false,
@@ -203,6 +206,7 @@ describe('live official-router scenarios', () => {
     const calldata = routerCalldata()
     const variants = buildLiveRouterScenarios(pool, calldata)
     expect(variants.map((variant) => variant.mutation).sort()).toEqual([
+      'flipped-direction',
       'hook-data-empty',
       'hook-data-marker',
       'smaller-amount',
@@ -245,11 +249,33 @@ describe('live official-router scenarios', () => {
     })
 
     expect(coverage.status).toBe('passed')
-    expect(coverage.scenarios).toBe(variants.length)
+    // Each variant, plus the two-execution sequence probe reported as one scenario.
+    expect(coverage.scenarios).toBe(variants.length + 1)
     expect(prefetch).toHaveBeenCalledTimes(1)
-    expect(execute).toHaveBeenCalledTimes(variants.length)
+    expect(execute).toHaveBeenCalledTimes(variants.length + 2)
     expect(close).toHaveBeenCalledTimes(1)
     expect(coverage.findings.every((finding) => finding.witness?.value === '7')).toBe(true)
+  })
+
+  it('flips swap direction while preserving every other field', () => {
+    const variants = buildLiveRouterScenarios(pool, routerCalldata())
+    const flipped = variants.find((variant) => variant.mutation === 'flipped-direction')!
+    const decoded = decodeUniswapV4Calldata(flipped.calldata)!
+    if (decoded.kind !== 'universal-router') throw new Error('Expected Universal Router calldata.')
+    expect(decoded.commands).toBe('0x1002')
+    expect(decoded.inputs[1]?.rawInput).toBe('0xcafebabe')
+    expect(locateUniswapV4Operations(decoded)[0]!.operation).toMatchObject({
+      kind: 'swap-exact-in-single',
+      zeroForOne: false,
+      amountIn: 100n,
+      amountOutMinimum: 5n,
+      hookData: '0x1234',
+    })
+  })
+
+  it('does not offer a tick-range variant for an operation that has no range', () => {
+    const variants = buildLiveRouterScenarios(pool, routerCalldata())
+    expect(variants.some((variant) => variant.mutation === 'widened-tick-range')).toBe(false)
   })
 
   it('does not attribute a different PoolId or opaque calldata', () => {
@@ -258,9 +284,52 @@ describe('live official-router scenarios', () => {
     expect(buildLiveRouterScenarios(pool, '0x12345678')).toEqual([])
   })
 
+  it('observes an unchanged historical custom-router sequence when its trace reaches PoolManager and the hook', async () => {
+    const base = replayCoverage('0x12345678')
+    const replay = {
+      ...base,
+      outcomes: [{
+        ...base.outcomes[0]!,
+        replay: {
+          ...replayResult(),
+          proof: {
+            ...replayResult().proof,
+            calls: [
+              { caller: ROUTER, target: MANAGER, bytecodeAddress: MANAGER, scheme: 'Call' as const, value: '0', inputLength: 100 },
+              { caller: MANAGER, target: HOOK, bytecodeAddress: HOOK, scheme: 'Call' as const, value: '0', inputLength: 100 },
+            ],
+          },
+        },
+      }],
+    }
+    const execute = vi.fn(async () => replayResult())
+    const coverage = await runLiveRouterScenarios({
+      scanId: 'custom-router-sequence',
+      client: {} as PublicClient,
+      poolManager: MANAGER,
+      pools: [pool],
+      replay,
+      signal: new AbortController().signal,
+      createSession: () => ({
+        prefetch: vi.fn(async () => ({ hydratedAccounts: 6, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 0, executions: 0 })),
+        execute,
+        metrics: () => ({ hydratedAccounts: 6, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 0, executions: 2 }),
+        close: vi.fn(),
+      }),
+    })
+
+    expect(coverage.status).toBe('degraded')
+    expect(coverage.recognizedPools).toBe(0)
+    expect(coverage.scenarios).toBe(1)
+    expect(execute).not.toHaveBeenCalled()
+    expect(coverage.findings[0]?.claim).toContain('exact historical custom-router payload')
+    expect(coverage.limitations.join(' ')).toContain('historical custom-router execution')
+  })
+
   it('generates the same controlled variants inside a canonical router subplan', () => {
     const variants = buildLiveRouterScenarios(pool, nestedSwapCalldata())
     expect(variants.map((variant) => variant.mutation).sort()).toEqual([
+      'flipped-direction',
       'hook-data-empty',
       'hook-data-marker',
       'smaller-amount',
@@ -301,12 +370,12 @@ describe('live official-router scenarios', () => {
       args: [42n],
       blockNumber: 9n,
     }))
-    expect(coverage.positionLookups).toEqual({ reads: 1, resolved: 1, unavailable: 0, nestedSkipped: 0, capped: 0 })
-    expect(coverage.scenarios).toBe(3)
-    expect(execute).toHaveBeenCalledTimes(3)
+    expect(coverage.positionLookups).toEqual({ reads: 1, resolved: 1, unavailable: 0, nestedSkipped: 0, capped: 0, observedTargets: 0, ambiguous: 0 })
+    expect(coverage.scenarios).toBe(4)
+    expect(execute).toHaveBeenCalledTimes(5)
   })
 
-  it('does not guess a PositionManager address for token IDs nested under Universal Router', async () => {
+  it('does not guess a PositionManager address when the replay trace shows no forwarded call', async () => {
     const readContract = vi.fn()
     const coverage = await runLiveRouterScenarios({
       scanId: 'nested-position-test',
@@ -319,7 +388,63 @@ describe('live official-router scenarios', () => {
 
     expect(readContract).not.toHaveBeenCalled()
     expect(coverage.positionLookups.nestedSkipped).toBe(1)
+    expect(coverage.positionLookups.observedTargets).toBe(0)
     expect(coverage.scenarios).toBe(0)
-    expect(coverage.limitations.join(' ')).toContain('does not encode the PositionManager address')
+    expect(coverage.limitations.join(' ')).toContain('did not identify exactly one forwarded PositionManager call')
+  })
+
+  it('attributes a nested token ID from the address the router actually called', async () => {
+    const calldata = nestedPositionManagerCalldata()
+    const forwarded = positionManagerCalldata()
+    const readContract = vi.fn(async () => [
+      { currency0: CURRENCY0, currency1: CURRENCY1, fee: 3_000, tickSpacing: 60, hooks: HOOK },
+      0n,
+    ])
+    const base = replayCoverage(calldata, { kind: 'modify-liquidity' })
+    const coverage = await runLiveRouterScenarios({
+      scanId: 'nested-attribution-test',
+      client: { readContract } as unknown as PublicClient,
+      poolManager: MANAGER,
+      pools: [pool],
+      replay: {
+        ...base,
+        outcomes: [{
+          ...base.outcomes[0]!,
+          replay: {
+            ...replayResult(),
+            proof: {
+              ...replayResult().proof,
+              calls: [{
+                caller: ROUTER,
+                target: POSITION_MANAGER,
+                bytecodeAddress: POSITION_MANAGER,
+                scheme: 'Call',
+                value: '0x0',
+                inputLength: (forwarded.length - 2) / 2,
+              }],
+            },
+          },
+        }],
+      },
+      signal: new AbortController().signal,
+      createSession: () => ({
+        prefetch: vi.fn(async () => ({ hydratedAccounts: 6, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 12, executions: 0 })),
+        execute: vi.fn(async () => replayResult()),
+        metrics: () => ({ hydratedAccounts: 6, hydratedStorageSlots: 0, hydratedBlockHashes: 0, rpcReads: 12, executions: 3 }),
+        close: vi.fn(),
+      }),
+    })
+
+    // The PositionManager address came from the observed call, not from the token ID.
+    expect(readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: POSITION_MANAGER,
+      functionName: 'getPoolAndPositionInfo',
+      args: [42n],
+      blockNumber: 9n,
+    }))
+    expect(coverage.positionLookups.observedTargets).toBe(1)
+    expect(coverage.positionLookups.resolved).toBe(1)
+    expect(coverage.positionLookups.nestedSkipped).toBe(0)
+    expect(coverage.limitations.join(' ')).toContain('the router actually called')
   })
 })
