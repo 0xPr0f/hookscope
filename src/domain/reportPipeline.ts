@@ -69,7 +69,10 @@ export const FIXTURE_SCENARIO_VERSION = 'hacken-browser-port/0.5.0'
 // 0.30.0: hook charges use one comparable pool-trade denominator in both
 // directions, retain input surcharges' all-in share separately, and never turn
 // an execution without a positive quantified delta into a measured 0% rate.
-export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.30.0'
+// 0.31.0: hook return deltas are measured from their transaction-scoped value
+// at swap entry, and cached observations are accepted only when their nested
+// PoolId, hook, fee and currencies match the selected pool.
+export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.31.0'
 
 /** Prevents a behavior report produced by older orchestration from masquerading as current. */
 export function reportMatchesCurrentPipeline(report: AnalysisReport, fixture: boolean) {

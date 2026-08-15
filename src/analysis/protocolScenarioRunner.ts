@@ -37,7 +37,8 @@ import { decodeProtocolRevert, summarizeProtocolSwapMovement, unresolvedProtocol
 // selector must first complete through the deployed PoolManager before a direct
 // rejection can count as bounded compatibility. Optional runtime probes also
 // share one per-pool time and hydration budget.
-export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.13.0'
+export const PROTOCOL_SCENARIO_VERSION = 'protocol-native-generated/0.14.0'
+const PROTOCOL_SCENARIO_DETECTOR_VERSION = '0.8.0'
 
 /** EIP-7825 caps a transaction at 2**24 gas; revm enforces it on recent forks. */
 const SCENARIO_GAS_LIMIT = 16_000_000n
@@ -129,7 +130,7 @@ function evidenceFor(input: {
   return {
     id: `protocol-scenario:${context.pool.poolId.slice(2, 14)}:${scenario.id}`,
     detectorId: 'protocol-native-scenario',
-    detectorVersion: '0.7.0',
+    detectorVersion: PROTOCOL_SCENARIO_DETECTOR_VERSION,
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: context.pool.hook,
@@ -178,7 +179,7 @@ function reinitializeEvidence(input: {
   return {
     id: `protocol-scenario:${context.pool.poolId.slice(2, 14)}:initialize:reinitialize`,
     detectorId: 'protocol-native-scenario',
-    detectorVersion: '0.5.0',
+    detectorVersion: PROTOCOL_SCENARIO_DETECTOR_VERSION,
     severity: input.status === 'completed' ? 'high' : 'info',
     evidenceClass: 'concrete-observation',
     subject: context.pool.hook,

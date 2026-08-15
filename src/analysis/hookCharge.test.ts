@@ -150,6 +150,29 @@ describe('hook charge reconstruction', () => {
     })
   })
 
+  it('measures the swap transition from a non-zero transaction-scoped entry delta', () => {
+    const observation = observe(proof({
+      storageOperations: [
+        // An earlier operation entered swap() with an existing -50 balance.
+        tstore(CURRENCY0, -50n, 1),
+        // The hook takes another 100, then swap() applies exactly +100.
+        tstore(CURRENCY0, -150n, 4),
+        tstore(CURRENCY0, -50n, 2),
+        // The earlier balance is settled after the selected swap returns.
+        tstore(CURRENCY0, 0n, 1),
+      ],
+    }))
+
+    expect(observation.status).toBe('observed')
+    expect(observation.components[0]).toMatchObject({
+      currency: CURRENCY0,
+      amount: '100',
+      denominator: '1000',
+      ratePpm: 100_000,
+    })
+    expect(observation.hookDeltaTimelines[0]?.values).toEqual(['-50', '-150', '-50', '0'])
+  })
+
   it('quantifies an output-side charge against gross pool output', () => {
     const observation = observe(proof({
       storageOperations: [tstore(CURRENCY1, -80n, 4), tstore(CURRENCY1, 0n, 2)],

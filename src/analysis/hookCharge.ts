@@ -63,26 +63,10 @@ function sameAddress(left: string, right: string) {
   return left.toLowerCase() === right.toLowerCase()
 }
 
-function descendantFrames(proof: RevmExecutionProof, rootFrameId: number): ReadonlySet<number> {
-  const frames = new Set([rootFrameId])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const call of proof.calls) {
-      if (call.committed === false) continue
-      if (call.frameId === undefined || call.parentFrameId === undefined) continue
-      if (!frames.has(call.parentFrameId) || frames.has(call.frameId)) continue
-      frames.add(call.frameId)
-      changed = true
-    }
-  }
-  return frames
-}
-
 function poolManagerOperationFrame(input: {
   proof: RevmExecutionProof
   poolManager: Address
-}): { frameId: number; frames: ReadonlySet<number> } | undefined {
+}): { frameId: number } | undefined {
   const swaps = input.proof.calls.filter((call) =>
     call.committed !== false
     && sameAddress(call.target, input.poolManager)
@@ -91,7 +75,7 @@ function poolManagerOperationFrame(input: {
   if (swaps.length !== 1) return undefined
   const frameId = swaps[0]!.frameId
   if (frameId === undefined) return undefined
-  return { frameId, frames: descendantFrames(input.proof, frameId) }
+  return { frameId }
 }
 
 function returnedHookDelta(input: {
@@ -100,23 +84,23 @@ function returnedHookDelta(input: {
   hook: Address
   currency: Address
   operationFrameId: number
-  operationFrames: ReadonlySet<number>
 }): bigint | undefined {
   const slot = currencyDeltaSlot(input.hook, input.currency).toLowerCase()
-  let previous = 0n
+  // EIP-1153 transient storage starts at zero for the transaction. Following
+  // every write below advances this to the real value at swap entry.
+  let transactionValue = 0n
   let returned: bigint | undefined
   for (const access of input.proof.storageOperations) {
     if (
       access.opcode !== 'TSTORE'
       || access.frameId === undefined
-      || !input.operationFrames.has(access.frameId)
       || !sameAddress(access.storageAddress ?? access.address, input.poolManager)
       || access.slot?.toLowerCase() !== slot
       || access.value === undefined
     ) continue
     const next = decodeSignedDelta(access.value)
     if (access.frameId === input.operationFrameId) {
-      const applied = next - previous
+      const applied = next - transactionValue
       // PoolManager accounts the hook's returned BalanceDelta once per currency
       // in the swap frame. More than one non-zero application is not safely
       // attributable to a single callback result.
@@ -125,7 +109,11 @@ function returnedHookDelta(input: {
         returned = applied
       }
     }
-    previous = next
+    // Transient storage is transaction-scoped, not call-frame-scoped. A prior
+    // PoolManager operation can leave this slot non-zero when swap() begins, so
+    // every committed write to the exact slot must advance the entry value even
+    // when it occurred outside the selected swap's call tree.
+    transactionValue = next
   }
   return returned ?? 0n
 }
@@ -210,7 +198,6 @@ export function observeHookCharge(input: {
     poolManager: input.poolManager,
     accounts: [hook],
     currencies: [input.currency0, input.currency1],
-    frameIds: operation.frames,
   })
   if (timelines.some((timeline) => !timeline.settled)) {
     return base({
@@ -248,7 +235,6 @@ export function observeHookCharge(input: {
       hook,
       currency,
       operationFrameId: operation.frameId,
-      operationFrames: operation.frames,
     })
     if (returned === undefined) {
       return base({

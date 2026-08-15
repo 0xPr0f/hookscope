@@ -82,7 +82,7 @@ function replayEvidence(outcome: PoolReplayOutcome, poolManager: Address, pool: 
   return {
     id: `revm-pool-replay:${candidate.kind}:${candidate.transactionHash}`,
     detectorId: 'revm-pool-replay',
-    detectorVersion: '0.6.0',
+    detectorVersion: '0.7.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: candidate.transaction.to,

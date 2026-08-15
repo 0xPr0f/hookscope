@@ -113,6 +113,49 @@ export function readHookChargeObservation(value: unknown): HookChargeObservation
   return { ...value, rebateComponents } as unknown as HookChargeObservation
 }
 
+function sameHex(left: string, right: string) {
+  return left.toLowerCase() === right.toLowerCase()
+}
+
+/**
+ * Cached report payloads are untrusted input. Bind every nested identifier back
+ * to the selected pool before allowing an observation into its summary.
+ */
+function observationMatchesPool(observation: HookChargeObservation, pool: PoolDescriptor) {
+  if (!sameHex(observation.poolId, pool.poolId) || !sameHex(observation.hook, pool.hook)) return false
+  if (observation.poolFee !== pool.fee) return false
+
+  const poolCurrencies = new Set([pool.currency0.toLowerCase(), pool.currency1.toLowerCase()])
+  const { inputCurrency, outputCurrency } = observation
+  const belongsToPool = (currency: Address) => poolCurrencies.has(currency.toLowerCase())
+
+  if (observation.status === 'not-quantified') {
+    // An incomplete execution may legitimately stop before both swap legs are
+    // decoded. Preserve that limitation in the report, but reject any partial
+    // currency metadata that contradicts the selected pool.
+    if ((inputCurrency && !belongsToPool(inputCurrency)) || (outputCurrency && !belongsToPool(outputCurrency))) return false
+  } else {
+    // Completed observations can affect charge/no-charge conclusions, so both
+    // legs must bind exactly to the selected pool before they are accepted.
+    if (!inputCurrency || !outputCurrency) return false
+    const observationCurrencies = new Set([inputCurrency.toLowerCase(), outputCurrency.toLowerCase()])
+    if (
+      observationCurrencies.size !== poolCurrencies.size
+      || [...poolCurrencies].some((currency) => !observationCurrencies.has(currency))
+    ) return false
+  }
+
+  const components = [...observation.components, ...observation.rebateComponents]
+  if (components.some((component) => {
+    if (!belongsToPool(component.currency)) return true
+    const expected = component.side === 'input' ? observation.inputCurrency : observation.outputCurrency
+    return expected === undefined || !sameHex(component.currency, expected)
+  })) return false
+
+  return observation.hookDeltaTimelines.every((timeline) =>
+    sameHex(timeline.account, pool.hook) && belongsToPool(timeline.currency))
+}
+
 function rateLabel(rates: readonly number[]): string {
   const unique = [...new Set(rates)].sort((left, right) => left - right)
   if (!unique.length) return 'Not quantified'
@@ -187,7 +230,7 @@ export function summarizePoolHookCharges(input: {
   const samples = input.findings.flatMap((finding) => {
     if (!finding.affectedPools.some((poolId) => poolId.toLowerCase() === input.pool.poolId.toLowerCase())) return []
     const observation = readHookChargeObservation(finding.technical?.hookCharge)
-    if (!observation) return []
+    if (!observation || !observationMatchesPool(observation, input.pool)) return []
     const transactionHash = typeof finding.technical?.transactionHash === 'string'
       ? finding.technical.transactionHash
       : typeof finding.technical?.historicalTransaction === 'string'

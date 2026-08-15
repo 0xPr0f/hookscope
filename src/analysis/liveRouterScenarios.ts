@@ -400,7 +400,7 @@ function evidence(
   return {
     id: `live-router:${outcome.poolId.slice(2, 14)}:${result.scenario.id}:${result.scenario.calldata.slice(-8)}`,
     detectorId: 'live-v4-router-variant',
-    detectorVersion: '0.5.0',
+    detectorVersion: '0.6.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: outcome.hook,
