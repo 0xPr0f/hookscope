@@ -35,6 +35,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm wasm:build
+      # Deployment consumes the checked-in Wasm packages because Vercel's
+      # JavaScript build image does not compile the Rust wrapper. Keep those
+      # packages pinned to a fresh wasm-pack build.
+      - run: git diff --exit-code src/wasm/
       - run: pnpm test
       - run: pnpm build
       - run: node scripts/validate-deployment.mjs

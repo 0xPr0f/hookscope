@@ -1,0 +1,16 @@
+{
+  "name": "hookscope-revm-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "hookscope_revm_wasm_bg.wasm",
+    "hookscope_revm_wasm.js",
+    "hookscope_revm_wasm.d.ts"
+  ],
+  "main": "hookscope_revm_wasm.js",
+  "types": "hookscope_revm_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

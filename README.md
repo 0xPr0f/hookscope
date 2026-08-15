@@ -35,7 +35,7 @@ pnpm dev
 
 Open `http://localhost:5173` and select **Load deterministic example** to exercise the browser engines without RPC access.
 
-The compiled Wasm packages under `src/wasm/` are generated and untracked. A fresh checkout that does not already have them needs a Rust toolchain and `wasm-pack`:
+The compiled Wasm packages under `src/wasm/` are checked in so Vercel and other JavaScript-only build environments can produce the application without installing Rust. Contributors changing the revm wrapper regenerate those pinned artifacts with:
 
 ```bash
 pnpm wasm:build

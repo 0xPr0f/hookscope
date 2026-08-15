@@ -7,9 +7,8 @@ import {
   SelectorAwareText,
   SelectorCatalogList,
   SelectorInline,
-  selectorAwareJson,
-  selectorsForDisplay,
 } from '../selectors/SelectorDisplay'
+import { selectorAwareJson, selectorsForDisplay } from '../selectors/selectorPresentation'
 import { EVIDENCE_SEVERITY_META, groupEvidenceBySeverity } from './evidenceGrouping'
 
 type StorageLayoutEntry = {
@@ -61,7 +60,10 @@ function EvidenceRow({ finding, selectorSignatures }: { finding: Evidence; selec
   const [open, setOpen] = useState(false)
   const detailId = `evidence-detail-${finding.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   const storageLayout = storageLayoutFromTechnical(finding.technical)
-  const technicalSelectors = selectorsForDisplay(finding.technical, selectorSignatures).map((entry) => entry.selector)
+  const technicalSelectors = useMemo(
+    () => selectorsForDisplay(finding.technical, selectorSignatures).map((entry) => entry.selector),
+    [finding.technical, selectorSignatures],
+  )
   const toggle = () => setOpen((value) => !value)
 
   const handleRowClick = () => {

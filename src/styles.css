@@ -910,6 +910,7 @@ footer { height: 86px; display: flex; justify-content: space-between; align-item
 .contract-selector-details > summary { width: max-content; padding: 8px 0; color: var(--muted); font-size: 10px; font-weight: 700; cursor: pointer; }
 .contract-selector-details[open] > summary { color: var(--ink); }
 .contract-selector-details > .selector-catalog-list { margin-bottom: 12px; }
+.evidence-card { content-visibility: auto; contain-intrinsic-size: 76px; }
 
 @media (max-width: 520px) {
   .selector-catalog-list { grid-template-columns: 1fr; }

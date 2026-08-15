@@ -30,7 +30,11 @@ describe('Sourcify 4byte signature lookup', () => {
       fetcher,
     )
 
-    expect(result['0x007074c3']).toEqual([{ name: 'LiquidityFrozen()', hasVerifiedContract: true }])
+    expect(result['0x007074c3']).toEqual([{
+      name: 'LiquidityFrozen()',
+      source: 'sourcify-4byte',
+      hasVerifiedContract: true,
+    }])
     expect(result['0xdeadbeef']).toEqual([])
     expect(fetcher).toHaveBeenCalledTimes(1)
   })
