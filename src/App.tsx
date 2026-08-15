@@ -10,6 +10,7 @@ import { FIXTURE_SCAN_ADDRESS } from './fixtures/bytecode'
 import { useAnalyzer } from './features/analyzer/useAnalyzer'
 import { PoolPicker } from './features/analyzer/PoolPicker'
 import { ScenarioResults } from './features/scenarios/ScenarioResults'
+import { scenarioConsoleCheckCount } from './features/scenarios/scenarioTranscript'
 import { EvidenceLedger } from './features/evidence/EvidenceLedger'
 import { ChainDropdown } from './components/ChainDropdown'
 import { HowItWorksPage, MethodologyPage } from './pages/InformationPages'
@@ -85,6 +86,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
   const explorer = reportChain.blockExplorers?.default
   const explorerBaseUrl = explorer?.url.replace(/\/$/, '')
   const explorerName = explorer?.name ?? 'chain explorer'
+  const testCheckCount = useMemo(() => scenarioConsoleCheckCount(report), [report])
   return (
     <section className="report" aria-live="polite">
       <div className="report-topline">
@@ -119,7 +121,7 @@ function ReportView({ report, history, currentnessStatus, currentness, theme, on
         <button type="button" role="tab" aria-selected={tab === 'overview'} aria-controls="report-panel-overview" onClick={() => setTab('overview')}>Overview</button>
         <button type="button" role="tab" aria-selected={tab === 'evidence'} aria-controls="report-panel-evidence" onClick={() => setTab('evidence')}>Evidence <span>{report.findings.length}</span></button>
         <button type="button" role="tab" aria-selected={tab === 'contracts'} aria-controls="report-panel-contracts" onClick={() => setTab('contracts')}>Contracts <span>{report.contractGraph.length}</span></button>
-        <button type="button" role="tab" aria-selected={tab === 'tests'} aria-controls="report-panel-tests" onClick={() => setTab('tests')}>Tests <span>{report.scenarios.completed}</span></button>
+        <button type="button" role="tab" aria-selected={tab === 'tests'} aria-controls="report-panel-tests" onClick={() => setTab('tests')}>Tests <span>{testCheckCount}</span></button>
       </div>
 
       {tab === 'overview' && (

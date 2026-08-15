@@ -43,6 +43,7 @@ describe('completed report pipeline identity', () => {
       'hacken-live-router-context/0.21.0',
       'hacken-live-router-context/0.22.0',
       'hacken-live-router-context/0.23.0',
+      'hacken-live-router-context/0.24.0',
     ]) {
       expect(superseded, 'a superseded version must not equal the current one').not.toBe(LIVE_SCENARIO_VERSION)
       expect(reportMatchesCurrentPipeline({ ...report, scenarioVersion: superseded }, false), superseded).toBe(false)

@@ -27,7 +27,11 @@ const pool: PoolDescriptor = {
   activity: 1,
 }
 
-function replayProof(input: { movement?: 'moved' | 'zero'; revert?: 'PoolAlreadyInitialized' }): ForkReplayResult {
+function replayProof(input: {
+  movement?: 'moved' | 'zero'
+  liquidity?: bigint
+  revert?: 'PoolAlreadyInitialized' | 'NoLiquidityToReceiveFees'
+}): ForkReplayResult {
   const logs = input.movement ? [{
     address: POOL_MANAGER,
     topics: encodeEventTopics({
@@ -38,12 +42,15 @@ function replayProof(input: { movement?: 'moved' | 'zero'; revert?: 'PoolAlready
     data: encodeAbiParameters(
       [{ type: 'int128' }, { type: 'int128' }, { type: 'uint160' }, { type: 'uint128' }, { type: 'int24' }, { type: 'uint24' }],
       input.movement === 'moved'
-        ? [-1n, 1n, 1n << 96n, 10n, 0, 3_000]
-        : [0n, 0n, 1n << 96n, 10n, 0, 3_000],
+        ? [-1n, 1n, 1n << 96n, input.liquidity ?? 10n, 0, 3_000]
+        : [0n, 0n, 1n << 96n, input.liquidity ?? 10n, 0, 3_000],
     ),
   }] : []
   const output = input.revert
-    ? encodeErrorResult({ abi: parseAbi(['error PoolAlreadyInitialized()']), errorName: input.revert })
+    ? encodeErrorResult({
+        abi: parseAbi(['error PoolAlreadyInitialized()', 'error NoLiquidityToReceiveFees()']),
+        errorName: input.revert,
+      })
     : '0x'
   const proof: RevmExecutionProof = {
     engine: 'test', success: !input.revert, gasUsed: 42_000, output,
@@ -195,6 +202,27 @@ describe('public Hacken scenario adaptation', () => {
       .find((item) => item.id === 'swap-small')
     expect(result).toMatchObject({ status: 'failed', observedOutcome: 'no-movement' })
     expect(result?.reason).toContain('zero movement')
+  })
+
+  it('marks zero-movement swaps with zero active liquidity unavailable instead of contradicted', () => {
+    const outcomes = completedOutcomes().map((outcome) => outcome.scenarioId === 'swap:exact-input:0-for-1:small'
+      ? { ...outcome, proof: replayProof({ movement: 'zero', liquidity: 0n }) }
+      : outcome)
+    const result = evaluatePublicHackenCases({ pools: [pool], outcomes, poolManager: POOL_MANAGER })
+      .find((item) => item.id === 'swap-small')
+    expect(result).toMatchObject({ status: 'unavailable', observedOutcome: 'no-movement' })
+    expect(result?.reason).toContain('zero active liquidity')
+    expect(result?.reason).toContain('unavailable rather than contradicted')
+  })
+
+  it('marks donation rejection caused only by zero active liquidity unavailable', () => {
+    const outcomes = completedOutcomes().map((outcome) => outcome.scenarioId === 'donate:minimal'
+      ? { ...outcome, status: 'reverted' as const, proof: replayProof({ revert: 'NoLiquidityToReceiveFees' }) }
+      : outcome)
+    const result = evaluatePublicHackenCases({ pools: [pool], outcomes, poolManager: POOL_MANAGER })
+      .find((item) => item.id === 'donate-dust')
+    expect(result).toMatchObject({ status: 'unavailable', observedOutcome: 'reverted' })
+    expect(result?.reason).toContain('missing pool-state prerequisite')
   })
 
   it('requires the expected reinitialization rejection instead of treating any revert as a pass', () => {

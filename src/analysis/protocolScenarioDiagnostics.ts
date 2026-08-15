@@ -47,6 +47,8 @@ export type ProtocolSwapMovement = {
   events: number
   movedEvents: number
   zeroMovement: boolean
+  activeLiquidityEvents: number
+  zeroActiveLiquidity: boolean
   deltas: { amount0: string; amount1: string }[]
 }
 
@@ -196,10 +198,13 @@ export function summarizeProtocolSwapMovement(input: {
     .filter((swap) => swap.poolId.toLowerCase() === input.poolId.toLowerCase())
   if (!swaps.length) return undefined
   const movedEvents = swaps.filter((swap) => swap.amount0 !== 0n || swap.amount1 !== 0n).length
+  const activeLiquidityEvents = swaps.filter((swap) => swap.liquidity !== 0n).length
   return {
     events: swaps.length,
     movedEvents,
     zeroMovement: movedEvents === 0,
+    activeLiquidityEvents,
+    zeroActiveLiquidity: activeLiquidityEvents === 0,
     deltas: swaps.slice(0, 8).map((swap) => ({
       amount0: swap.amount0.toString(),
       amount1: swap.amount1.toString(),

@@ -21,10 +21,10 @@ import {
  * is deliberately bounded to those executions; it is not a universal verdict.
  */
 
-// 0.6.0 requires paired PoolManager-mediated/direct callback evidence, isolates
-// optional selector failures, and counts only runtime calls that returned an
-// execution proof. Older direct-revert results are not semantically equivalent.
-export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.6.0'
+// 0.7.0 separates absent pool-state prerequisites from contradicted hook
+// expectations. A zero-liquidity donation or a zero-movement Swap emitted with
+// zero active liquidity is unavailable evidence, not hook incompatibility.
+export const PUBLIC_HACKEN_VERSION = 'hacken-public-pool-assertions/0.7.0'
 export const PUBLIC_HACKEN_UPSTREAM_COMMIT = '965be6006eab54ff65b83285ef40a245c8735149'
 
 export type PublicHackenClassification = 'portable' | 'conditional' | 'fixture-only'
@@ -169,6 +169,11 @@ function expectationText(expectation: PublicHackenExpectation) {
     : 'Complete every required execution against the selected PoolManager and PoolId.'
 }
 
+function diagnosticContainsName(diagnostic: ProtocolRevertDiagnostic, name: string): boolean {
+  return diagnostic.name === name
+    || Boolean(diagnostic.nested && diagnosticContainsName(diagnostic.nested, name))
+}
+
 function evaluateCase(input: {
   definition: PublicHackenCaseDefinition
   pool: PoolDescriptor
@@ -261,6 +266,8 @@ function evaluateCase(input: {
         events: movementParts.reduce((sum, item) => sum + item.events, 0),
         movedEvents: movementParts.reduce((sum, item) => sum + item.movedEvents, 0),
         zeroMovement: movementParts.every((item) => item.zeroMovement),
+        activeLiquidityEvents: movementParts.reduce((sum, item) => sum + item.activeLiquidityEvents, 0),
+        zeroActiveLiquidity: movementParts.every((item) => item.zeroActiveLiquidity),
         deltas: movementParts.flatMap((item) => item.deltas).slice(0, 8),
       }
     : undefined
@@ -313,6 +320,21 @@ function evaluateCase(input: {
     }
   }
 
+  const noLiquidityReverts = revertDiagnostics.filter((diagnostic) =>
+    diagnosticContainsName(diagnostic, 'NoLiquidityToReceiveFees')).length
+  if (definition.section === 'donate' && completed === 0 && reverted > 0 && noLiquidityReverts === reverted) {
+    return {
+      ...base,
+      status: 'unavailable',
+      observedOutcome,
+      scenarioIds: executed.map((outcome) => outcome.scenarioId),
+      gasUsed: gasUsed || undefined,
+      revertDiagnostics,
+      swapMovement,
+      reason: 'The pool had zero active liquidity at the pinned tick, so donation completion could not be evaluated. This is a missing pool-state prerequisite, not a contradicted hook expectation.',
+    }
+  }
+
   const movementByScenario = new Map(executed.flatMap((outcome) => {
     if (outcome.status !== 'completed' || !input.poolManager || !outcome.proof) return []
     const movement = summarizeProtocolSwapMovement({
@@ -334,6 +356,18 @@ function evaluateCase(input: {
         revertDiagnostics: revertDiagnostics.length ? revertDiagnostics : undefined,
         swapMovement,
         reason: `Non-zero Swap movement could not be verified for ${completedWithoutProof.length} completed execution${completedWithoutProof.length === 1 ? '' : 's'}.`,
+      }
+    }
+    if (swapMovement?.zeroMovement && swapMovement.zeroActiveLiquidity) {
+      return {
+        ...base,
+        status: 'unavailable',
+        observedOutcome,
+        scenarioIds: executed.map((outcome) => outcome.scenarioId),
+        gasUsed: gasUsed || undefined,
+        revertDiagnostics: revertDiagnostics.length ? revertDiagnostics : undefined,
+        swapMovement,
+        reason: 'Matching Swap events reported zero active liquidity and zero currency movement at the pinned state. Non-zero swap behavior could not be evaluated, so this is unavailable rather than contradicted.',
       }
     }
   }
@@ -413,7 +447,7 @@ export function publicHackenSuiteEvidence(input: {
   return {
     id: 'hacken-public-pool-suite',
     detectorId: 'hacken-public-pool-suite',
-    detectorVersion: '0.6.0',
+    detectorVersion: '0.7.0',
     severity: failed ? 'medium' : warnings ? 'low' : 'info',
     evidenceClass: 'concrete-observation',
     subject: input.poolManager,

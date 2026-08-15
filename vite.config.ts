@@ -60,9 +60,35 @@ export default defineConfig(({ mode }) => {
       env.SUBGRAPH_API_KEY,
       env.SUBGRAPH_REQUEST_ORIGIN || 'https://hook.centaurion.xyz',
     ), react()],
-    // EVMole's wasm-bindgen entrypoint resolves its binary relative to
-    // import.meta.url. Prebundling relocates that module without its .wasm file.
-    optimizeDeps: { exclude: ['evmole'] },
+    // Keep every eagerly and lazily loaded feature on the same React module
+    // instance. This matters for the source workspace because CodeMirror is
+    // loaded in a separate chunk and declares React as a peer dependency.
+    resolve: {
+      dedupe: ['react', 'react-dom'],
+    },
+    // Use one explicit development endpoint for HTTP and HMR. Without a fixed
+    // port Vite can move the HTTP server while the browser keeps reconnecting
+    // its WebSocket to 5173, leaving lazy chunks attached to a stale optimizer
+    // graph.
+    server: {
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true,
+      hmr: {
+        host: 'localhost',
+        clientPort: 5173,
+        protocol: 'ws',
+      },
+    },
+    // The source workspace is lazy-loaded, so its editor dependencies are not
+    // guaranteed to be discovered during Vite's initial static crawl. Bundle
+    // them up front to avoid a mid-session optimizer reload when Contracts is
+    // opened for the first time. EVMole must stay outside the optimizer because
+    // its wasm-bindgen entrypoint resolves the binary relative to import.meta.url.
+    optimizeDeps: {
+      include: ['@uiw/react-codemirror', '@replit/codemirror-lang-solidity'],
+      exclude: ['evmole'],
+    },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

@@ -51,7 +51,12 @@ function ResultLine({ line, selectorSignatures }: { line: ScenarioConsoleLine; s
           {line.gasUsed && <span className="test-gas">gas {Number(line.gasUsed).toLocaleString()}</span>}
         </div>
         {line.description && <p className="test-description"><SelectorAwareText lookup={selectorSignatures}>{line.description}</SelectorAwareText></p>}
-        {line.detail && <p className="test-detail"><span>Result</span><SelectorAwareText lookup={selectorSignatures}>{line.detail}</SelectorAwareText></p>}
+        {line.detail && (
+          <p className="test-detail">
+            <span className="test-detail-label">Result</span>
+            <span className="test-detail-copy"><SelectorAwareText lookup={selectorSignatures}>{line.detail}</SelectorAwareText></span>
+          </p>
+        )}
       </div>
     </div>
   )
@@ -59,13 +64,16 @@ function ResultLine({ line, selectorSignatures }: { line: ScenarioConsoleLine; s
 
 function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSuite; selectorSignatures?: SelectorSignatureLookup }) {
   const sections = [...new Set(suite.lines.map((line) => line.section))]
+  const totalChecks = suite.ran
+    ? suite.lines.filter((line) => line.status !== 'SKIP').length
+    : 0
   const executedTests = suite.ran
     ? suite.lines.filter((line) => line.status !== 'UNAVAILABLE' && line.status !== 'SKIP').length
     : 0
   // An analyzer error is a malfunction and fails the suite; a revert is not.
-  const result = suite.failed > 0 || suite.errored > 0
+  const result = suite.errored > 0 || (suite.id === 'hacken-port' && suite.failed > 0)
     ? 'FAILED'
-    : (suite.warned ?? 0) > 0
+    : suite.id === 'hacken-public' && (suite.failed > 0 || (suite.warned ?? 0) > 0)
       ? 'REVIEW'
     : suite.id === 'hacken-public' && suite.ran && suite.unavailable > 0
       ? 'PARTIAL'
@@ -74,15 +82,15 @@ function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSui
       : 'SKIPPED'
   const suiteStats = suite.id === 'hacken-public'
     ? [
-        { label: 'Checks', value: executedTests },
+        { label: 'Checks', value: totalChecks },
         { label: 'Compatible', value: suite.passed },
         { label: 'Review', value: suite.warned ?? 0 },
         { label: 'Contradicted', value: suite.failed },
       ]
     : [
-        { label: 'Tests', value: executedTests },
+        { label: 'Checks', value: totalChecks },
+        { label: 'Executed', value: executedTests },
         { label: 'EVM runs', value: suite.executions },
-        { label: 'Outcomes', value: suite.passed + suite.observed + (suite.covered ?? 0) },
         { label: 'Unavailable', value: suite.unavailable },
       ]
   return (
@@ -104,7 +112,7 @@ function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSui
       <div className="foundry-console" aria-label={`${suite.name} scenario output`}>
         <div className="test-console-run">
           <span>Execution transcript</span>
-          <strong>{executedTests} test{executedTests === 1 ? '' : 's'} · {suite.executions} EVM run{suite.executions === 1 ? '' : 's'}</strong>
+          <strong>{totalChecks} check{totalChecks === 1 ? '' : 's'} · {executedTests} executed · {suite.executions} EVM run{suite.executions === 1 ? '' : 's'}</strong>
         </div>
         <div className="test-console-sections">
           {sections.map((section) => {
@@ -126,8 +134,9 @@ function SuiteConsole({ suite, selectorSignatures }: { suite: ScenarioConsoleSui
         </div>
         <div className={`test-console-summary test-summary-${result.toLowerCase()}`}>
           <strong>Suite result: {result}</strong>
-          <span>{suite.passed} passed · {suite.failed} failed · {suite.observed} observed
-          {(suite.warned ?? 0) > 0 ? `; ${suite.warned} behavior differs` : ''}
+          <span>{suite.id === 'hacken-public'
+            ? `${suite.passed} compatible · ${suite.warned ?? 0} behavior differs · ${suite.failed} contradicted · ${suite.observed} observed`
+            : `${suite.passed} passed · ${suite.failed} failed · ${suite.observed} observed`}
           {suite.covered ? `; ${suite.covered} covered by round trip` : ''}
           {suite.unavailable > 0 ? `; ${suite.unavailable} unavailable` : ''}
           {suite.errored > 0 ? `; ${suite.errored} errored` : ''}; {suite.skipped} skipped

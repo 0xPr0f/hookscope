@@ -59,11 +59,14 @@ export type ScenarioConsoleSuite = {
  */
 function diagnosticSummaries(value: unknown) {
   if (!Array.isArray(value)) return []
-  return value.flatMap((item) => {
+  const summaries = value.flatMap((item) => {
     const diagnostic = record(item)
     const summary = stringValue(diagnostic?.summary)
     return summary ? [summary] : []
   })
+  const occurrences = new Map<string, number>()
+  for (const summary of summaries) occurrences.set(summary, (occurrences.get(summary) ?? 0) + 1)
+  return [...occurrences].map(([summary, count]) => count > 1 ? `${summary} (×${count})` : summary)
 }
 
 function movementResult(value: unknown) {
@@ -72,8 +75,9 @@ function movementResult(value: unknown) {
   const events = numberValue(movement.events)
   const movedEvents = numberValue(movement.movedEvents)
   const zeroMovement = movement.zeroMovement === true
+  const zeroActiveLiquidity = movement.zeroActiveLiquidity === true
   if (events === undefined || movedEvents === undefined) return undefined
-  return { events, movedEvents, zeroMovement }
+  return { events, movedEvents, zeroMovement, zeroActiveLiquidity }
 }
 
 function publicHackenSuite(report: AnalysisReport): ScenarioConsoleSuite {
@@ -282,8 +286,31 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
   // PoolManager call stack or its transient unlock context, so a revert there
   // is not a PoolManager scenario result. Only recognized-router executions that
   // reached the real PoolManager belong in this Foundry-style transcript.
-  const findings = report.findings.filter((finding) => finding.detectorId === 'live-v4-router-variant')
-  const lines = findings.map((finding): ScenarioConsoleLine => {
+  const replayFindings = report.findings.filter((finding) => finding.detectorId === 'revm-pool-replay')
+  const replayLines = replayFindings.map((finding): ScenarioConsoleLine => {
+    const technical = finding.technical
+    const kind = stringValue(technical?.eventKind) ?? 'transaction'
+    const transactionHash = stringValue(technical?.transactionHash)
+    const stateBlockNumber = stringValue(technical?.stateBlockNumber)
+    const receiptMatched = technical?.receiptMatched !== false
+    return {
+      id: finding.id,
+      section: 'ORIGINAL TRANSACTION REPLAY',
+      name: normalizedTestName(`replay_${kind}_${transactionHash?.slice(2, 10) ?? 'pinned'}`),
+      status: receiptMatched ? 'PASS' : 'ERROR',
+      description: `Reproduce the indexed ${kind.replace('-', ' ')} transaction from parent-block state and compare it with the chain receipt.`,
+      gasUsed: stringValue(technical?.gasUsed),
+      detail: [
+        receiptMatched ? 'Receipt matched' : 'Receipt match was not recorded',
+        transactionHash ? `transaction ${transactionHash}` : undefined,
+        stateBlockNumber ? `parent state block ${stateBlockNumber}` : undefined,
+        finding.claim,
+      ].filter(Boolean).join(' · '),
+      executions: 1,
+    }
+  })
+  const variantFindings = report.findings.filter((finding) => finding.detectorId === 'live-v4-router-variant')
+  const variantLines = variantFindings.map((finding): ScenarioConsoleLine => {
     const technical = finding.technical
     const scenarioId = stringValue(technical?.scenarioId) ?? legacyLiveScenarioId(finding)
     const scenarioDescription = stringValue(technical?.scenarioDescription) ?? legacyLiveScenarioDescription(finding)
@@ -306,6 +333,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
       executions: executionCount,
     }
   })
+  const lines = [...replayLines, ...variantLines]
   const ran = lines.length > 0
   const phase = report.phases.find((item) => item.id === 'scenarios')
   const hasDeprecatedDirectProbes = report.findings.some((finding) => finding.detectorId === 'live-hook-callback-observation')
@@ -317,7 +345,7 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
   return {
     id: 'live-context',
     name: 'LivePoolManagerScenarios',
-    description: 'Replays receipt-matched historical router context and controlled variants when the outer calldata envelope is recognized.',
+    description: 'Shows exact receipt-matched historical transactions separately from controlled router variants. Exact replay does not require a recognized calldata envelope.',
     version: report.scenarioVersion,
     ran,
     lines: ran ? lines : [{
@@ -328,11 +356,11 @@ function liveSuite(report: AnalysisReport): ScenarioConsoleSuite {
       description: 'Replay and vary a recognized historical router call that reached the selected PoolManager.',
       detail: skippedReason,
     }],
-    passed: 0,
+    passed: replayLines.filter((line) => line.status === 'PASS').length,
     failed: 0,
-    observed: lines.length,
+    observed: variantLines.length,
     unavailable: 0,
-    errored: 0,
+    errored: replayLines.filter((line) => line.status === 'ERROR').length,
     skipped: ran ? 0 : 1,
     executions: ran ? lines.reduce((total, line) => total + (line.executions ?? 1), 0) : 0,
     reason: ran ? undefined : skippedReason,
@@ -420,7 +448,7 @@ function generatedSuite(report: AnalysisReport): ScenarioConsoleSuite {
     unavailable: statusCount('UNAVAILABLE'),
     errored: statusCount('ERROR'),
     skipped: ran ? 0 : 1,
-    executions: statusCount('PASS') + statusCount('REVERT'),
+    executions: statusCount('PASS') + statusCount('REVERT') + statusCount('NOOP'),
     reason: ran ? undefined : skippedReason,
   }
 }
@@ -514,6 +542,12 @@ export function buildScenarioConsoleSuites(report: AnalysisReport): ScenarioCons
   // Fixture and public reports are disjoint products. Mixing their suite cards
   // would make inapplicable paths look like tests that failed to run.
   return fixtureConformance.ran ? [fixtureConformance] : publicSuites
+}
+
+/** Number shown on the Tests tab: every report-backed check, including unavailable checks, but never a synthetic skip row. */
+export function scenarioConsoleCheckCount(report: AnalysisReport) {
+  return buildScenarioConsoleSuites(report)
+    .reduce((total, suite) => total + suite.lines.filter((line) => line.status !== 'SKIP').length, 0)
 }
 
 export const HACKEN_UPSTREAM_COMMIT = HACKEN_COMMIT

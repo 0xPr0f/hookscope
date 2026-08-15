@@ -80,7 +80,7 @@ function replayEvidence(outcome: PoolReplayOutcome): Evidence | undefined {
   return {
     id: `revm-pool-replay:${candidate.kind}:${candidate.transactionHash}`,
     detectorId: 'revm-pool-replay',
-    detectorVersion: '0.2.0',
+    detectorVersion: '0.3.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: candidate.transaction.to,
@@ -101,7 +101,13 @@ function replayEvidence(outcome: PoolReplayOutcome): Evidence | undefined {
     technical: {
       eventKind: candidate.kind,
       transactionHash: candidate.transactionHash,
+      blockNumber: candidate.block.number.toString(),
       stateBlockNumber: candidate.stateBlockNumber.toString(),
+      receiptMatched: true,
+      expectedOutcome: candidate.expected.success ? 'success' : 'revert',
+      reproducedOutcome: replay.proof.success ? 'success' : 'revert',
+      gasUsed: replay.proof.gasUsed.toString(),
+      logCount: replay.proof.logCount,
       engine: replay.proof.engine,
       hydrationRequests: replay.hydrationRequests,
       hydratedAccounts: replay.hydratedAccounts,

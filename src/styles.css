@@ -559,8 +559,10 @@ h1 { max-width: 780px; margin: 16px 0 16px; font-size: clamp(42px, 5.1vw, 66px);
 .test-console-title strong { min-width: 0; color: var(--code-text); font-size: 12px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
 .test-gas { flex: 0 0 auto; color: var(--quiet); font-size: 9px; white-space: nowrap; }
 .test-description { margin: 0; color: color-mix(in srgb, var(--code-text) 78%, transparent); font-family: inherit; font-size: 10.5px; line-height: 1.6; }
-.test-detail { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--quiet); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
-.test-detail > span { flex: 0 0 auto; color: var(--syntax-comment); font-size: 8px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.test-detail { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; margin: 0; color: var(--quiet); font-size: 10px; line-height: 1.6; }
+.test-detail-label { color: var(--syntax-comment); font-size: 8px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.test-detail-copy { min-width: 0; overflow-wrap: anywhere; }
+.test-detail-copy .selector-inline-compact { max-width: 100%; }
 .test-result { width: fit-content; max-width: 112px; min-height: 25px; display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid currentColor; font-size: 8px; font-weight: 820; line-height: 1.2; letter-spacing: .06em; text-transform: uppercase; }
 .test-result-pass, .test-result-compatible { color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
 .test-result-warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 8%, transparent); }

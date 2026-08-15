@@ -49,7 +49,10 @@ export const FIXTURE_SCENARIO_VERSION = 'hacken-browser-port/0.5.0'
 // 0.24.0: public callback authorization now requires paired successful
 // PoolManager mediation plus a comparable direct rejection. Runtime probes are
 // independently degradable and share one bounded time/hydration budget.
-export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.24.0'
+// 0.25.0: zero-liquidity prerequisites no longer become public assertion
+// contradictions, exact receipt-matched replays appear in the test transcript,
+// and report-backed check/execution totals have unambiguous semantics.
+export const LIVE_SCENARIO_VERSION = 'hacken-live-router-context/0.25.0'
 
 /** Prevents a behavior report produced by older orchestration from masquerading as current. */
 export function reportMatchesCurrentPipeline(report: AnalysisReport, fixture: boolean) {

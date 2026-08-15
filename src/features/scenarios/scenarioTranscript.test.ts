@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AnalysisReport, Evidence } from '../../domain/report'
-import { buildScenarioConsoleSuites, type ScenarioConsoleSuite } from './scenarioTranscript'
+import { buildScenarioConsoleSuites, scenarioConsoleCheckCount, type ScenarioConsoleSuite } from './scenarioTranscript'
 
 /** Indexing by id keeps a suite assertion honest if the console order changes. */
 function suite(suites: ScenarioConsoleSuite[], id: ScenarioConsoleSuite['id']) {
@@ -76,6 +76,29 @@ describe('scenario console transcript', () => {
       detail: 'completed at pinned block',
       gasUsed: '42000',
     })
+  })
+
+  it('shows the original receipt-matched transaction separately from controlled variants', () => {
+    const transactionHash = `0x${'cd'.repeat(32)}`
+    const replayReport = report([finding({
+      id: `revm-pool-replay:swap:${transactionHash}`,
+      detectorId: 'revm-pool-replay',
+      title: 'swap transaction reproduced in revm',
+      claim: 'The historical transaction reproduced its successful outcome, 7 logs, and 125000 gas.',
+      technical: {
+        eventKind: 'swap', transactionHash, stateBlockNumber: '99', receiptMatched: true,
+        gasUsed: '125000', logCount: 7,
+      },
+    })])
+    const live = suite(buildScenarioConsoleSuites(replayReport), 'live-context')
+    expect(live).toMatchObject({ ran: true, passed: 1, observed: 0, errored: 0, executions: 1 })
+    expect(live.lines[0]).toMatchObject({
+      section: 'ORIGINAL TRANSACTION REPLAY',
+      status: 'PASS',
+      gasUsed: '125000',
+    })
+    expect(live.lines[0]!.detail).toContain('Receipt matched')
+    expect(live.lines[0]!.detail).toContain(transactionHash)
   })
 
   it('counts both EVM calls represented by a repeated-sequence observation', () => {
@@ -201,6 +224,27 @@ describe('scenario console transcript', () => {
     })
   })
 
+  it('groups repeated decoded revert diagnostics without losing their count', () => {
+    const repeated = 'The call reverted with ExactOutputNotAllowed() (selector 0x6fdd6ae0; Sourcify 4byte candidate).'
+    const suites = buildScenarioConsoleSuites(report([
+      finding({
+        id: 'hacken-public-pool-suite', detectorId: 'hacken-public-pool-suite',
+        technical: {
+          cases: [{
+            poolId: `0x${'ab'.repeat(32)}`, id: 'swap-corpus', upstream: 'FuzzTestEntry.test_Fuzz_Swap_Amounts',
+            section: 'swap', description: 'Bounded swap corpus', classification: 'portable', status: 'warning',
+            expectation: 'Complete every required execution.', reason: '6/12 executions met the expectation.',
+            observedOutcome: 'mixed', scenarioIds: Array.from({ length: 12 }, (_, index) => `swap:${index}`),
+            revertDiagnostics: Array.from({ length: 6 }, () => ({ summary: repeated })),
+          }],
+        },
+      }),
+    ]))
+    const detail = suite(suites, 'hacken-public').lines[0]!.detail
+    expect(detail).toContain(`${repeated} (×6)`)
+    expect(detail?.match(/ExactOutputNotAllowed/g)).toHaveLength(1)
+  })
+
   it('describes observed runtime introspection without pretending it emitted a PoolManager event', () => {
     const suites = buildScenarioConsoleSuites(report([
       finding({
@@ -251,6 +295,23 @@ describe('scenario console transcript', () => {
     expect(generated.lines[3]!.detail).toBe('worker died')
   })
 
+  it('counts completed zero-movement generated outcomes as EVM executions', () => {
+    const generatedReport = report([finding({
+      id: 'protocol-scenario-suite', detectorId: 'protocol-native-scenario-suite',
+      technical: {
+        outcomes: [
+          {
+            poolId: `0x${'ab'.repeat(32)}`, scenarioId: 'swap:no-movement', operation: 'swap', status: 'completed',
+            swapMovement: { events: 1, movedEvents: 0, zeroMovement: true },
+          },
+        ],
+      },
+    })])
+    const generated = suite(buildScenarioConsoleSuites(generatedReport), 'generated-protocol')
+    expect(generated).toMatchObject({ observed: 1, executions: 1 })
+    expect(generated.lines[0]?.status).toBe('NOOP')
+  })
+
   it('renders the ERC-20 settlement lane as its own suite carrying the comparison', () => {
     const suites = buildScenarioConsoleSuites(report([
       finding({
@@ -298,6 +359,12 @@ describe('scenario console transcript', () => {
     expect(lane.lines[1]!.section).toContain('TOKEN SETTLEMENT SPECIFIC')
     expect(lane.lines[2]!.detail).toContain('no funded holder')
     expect(lane.lines[3]!.detail).toContain('committed native → token → native round trip')
+    expect(scenarioConsoleCheckCount(report([
+      finding({
+        id: 'erc20-lane:counted', detectorId: 'protocol-native-erc20-lane',
+        technical: { scenarioId: 'lane', status: 'preparation-unavailable', reason: 'no funded holder' },
+      }),
+    ]))).toBe(1)
   })
 
   it('skips the ERC-20 lane explicitly when no funded holder was available', () => {

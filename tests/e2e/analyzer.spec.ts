@@ -26,7 +26,8 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   test.setTimeout(90_000)
   await page.goto('/')
   await page.getByRole('button', { name: 'Load deterministic example' }).click()
-  await page.getByRole('button', { name: 'Analyze token' }).click()
+  await page.getByRole('button', { name: 'Find pools' }).click()
+  await page.getByRole('button', { name: 'Analyze 3 selected pools' }).click()
 
   await expect(page.getByText('Completed browser report')).toBeVisible({ timeout: 60_000 })
   await expect(
@@ -49,6 +50,7 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   // deterministic report must show only its assertion oracle, never public
   // suites that did not run.
   await page.getByRole('tab', { name: /Tests/ }).click()
+  await expect(page.getByRole('tab', { name: 'Tests 40', exact: true })).toBeVisible()
   await expect(page.getByText('How to read these suites')).toBeVisible()
   await expect(page.getByText('Runs the complete 40-case port against deterministic expected outcomes.', { exact: false })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'HackenPortFixtureConformance', exact: true })).toBeVisible()
@@ -57,6 +59,7 @@ test('runs the deterministic browser engines and records bounded outcomes', asyn
   }
   const transcript = page.getByLabel('HackenPortFixtureConformance scenario output')
   await expect(transcript).toContainText('Suite result: OK')
+  await expect(transcript).toContainText('40 checks · 40 executed · 80 EVM runs')
   await expect(transcript).toContainText('Tiny exact-input swap')
   await expect(transcript).toContainText('Executed against the deterministic browser conformance fixture')
 

@@ -84,6 +84,13 @@ describe('live pool replay coverage', () => {
     expect(result.passedTransactions).toBe(1)
     expect(result.coveredPools).toBe(1)
     expect(result.findings).toHaveLength(1)
+    expect(result.findings[0]?.technical).toMatchObject({
+      receiptMatched: true,
+      expectedOutcome: 'success',
+      reproducedOutcome: 'success',
+      gasUsed: '100',
+      logCount: 1,
+    })
     expect(result.limitations[0]).toContain('No indexed historical transaction')
     expect(result.limitations[1]).toContain('1 selected pool has')
   })
