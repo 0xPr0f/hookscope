@@ -1,34 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
-import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { fileURLToPath } from 'node:url'
-
-const methodologyPath = fileURLToPath(new URL('./docs/V4_HOOK_ANALYZER_ARCHITECTURE.md', import.meta.url))
-const methodologyUrl = '/docs/V4_HOOK_ANALYZER_ARCHITECTURE.md'
-
-function methodologyAsset(emitBuildAsset: boolean): Plugin {
-  const serveMethodology = (request: { url?: string }, response: { setHeader(name: string, value: string): void; end(body: Buffer): void }, next: () => void) => {
-    if (request.url?.split('?', 1)[0] !== methodologyUrl) return next()
-    response.setHeader('Content-Type', 'text/markdown; charset=utf-8')
-    response.end(readFileSync(methodologyPath))
-  }
-  const plugin: Plugin = {
-    name: 'hookscope-methodology-asset',
-    configureServer(server: { middlewares: { use(handler: typeof serveMethodology): void } }) {
-      server.middlewares.use(serveMethodology)
-    },
-    configurePreviewServer(server: { middlewares: { use(handler: typeof serveMethodology): void } }) {
-      server.middlewares.use(serveMethodology)
-    },
-  }
-  if (emitBuildAsset) {
-    plugin.buildStart = function buildMethodologyAsset() {
-      this.emitFile({ type: 'asset', fileName: methodologyUrl.slice(1), source: readFileSync(methodologyPath) })
-    }
-  }
-  return plugin
-}
 
 /**
  * Serves the pool-index proxy in dev with the same contract as the deployed
@@ -72,7 +44,7 @@ function subgraphProxy(apiKey: string | undefined): Plugin {
   }
 }
 
-export default defineConfig(({ mode, command }) => {
+export default defineConfig(({ mode }) => {
   // Vite exposes prefixed values through import.meta.env, but it deliberately
   // does not merge server-only values from .env into process.env. Load the
   // complete environment here so the local proxy sees the same server-side key
@@ -80,7 +52,7 @@ export default defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
-    plugins: [methodologyAsset(command === 'build'), subgraphProxy(env.SUBGRAPH_API_KEY), react()],
+    plugins: [subgraphProxy(env.SUBGRAPH_API_KEY), react()],
     // EVMole's wasm-bindgen entrypoint resolves its binary relative to
     // import.meta.url. Prebundling relocates that module without its .wasm file.
     optimizeDeps: { exclude: ['evmole'] },
