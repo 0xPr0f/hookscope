@@ -19,9 +19,9 @@ import { allowMethods, discoveryAllowed, requestIp } from '../_lib/http.js'
 
 const MAX_PAGE_SIZE = 1_000
 const MAX_CURSOR_LENGTH = 80
-// Finish before Vercel's 10-second function ceiling so callers receive a
+// Finish before Vercel's 30-second function ceiling so callers receive a
 // structured 504 instead of a platform-level FUNCTION_INVOCATION_FAILED page.
-const UPSTREAM_TIMEOUT_MS = 8_500
+const UPSTREAM_TIMEOUT_MS = 25_000
 
 function validOrigin(value: string | undefined): string | undefined {
   if (!value) return undefined

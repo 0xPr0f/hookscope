@@ -5,8 +5,11 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
   "functions": {
-    "api/**/*.ts": {
+    "api/reports/**/*.ts": {
       "maxDuration": 10
+    },
+    "api/subgraph/**/*.ts": {
+      "maxDuration": 30
     }
   },
   "rewrites": [{ "source": "/((?!api/|assets/).*)", "destination": "/index.html" }],

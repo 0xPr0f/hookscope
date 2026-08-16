@@ -30,7 +30,8 @@ if (vercel) {
   check(vercel.installCommand === 'pnpm install --frozen-lockfile', 'vercel.json must install from the lockfile.')
   check(vercel.buildCommand === 'pnpm build', 'vercel.json must use the production build command.')
   check(vercel.outputDirectory === 'dist', 'vercel.json must publish dist/.')
-  check(vercel.functions?.['api/**/*.ts']?.maxDuration === 10, 'Storage functions must have a 10-second maximum duration.')
+  check(vercel.functions?.['api/reports/**/*.ts']?.maxDuration === 10, 'Storage functions must have a 10-second maximum duration.')
+  check(vercel.functions?.['api/subgraph/**/*.ts']?.maxDuration === 30, 'The subgraph proxy must have a 30-second maximum duration.')
   check(
     vercel.rewrites?.some((rewrite) => rewrite.source.includes('api/') && rewrite.source.includes('assets/') && rewrite.destination === '/index.html'),
     'The SPA rewrite must exclude /api and /assets routes.',
