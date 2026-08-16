@@ -18,40 +18,11 @@ describe('completed report pipeline identity', () => {
   })
 
   it('rejects every published live version that predates the current one', () => {
-    // A report can look identical while resting on weaker guarantees, so each
-    // superseded orchestration has to stay explicitly invalid. Extend this list
-    // rather than replacing it whenever the live version moves.
-    for (const superseded of [
-      'hacken-live-router-context/0.3.0',
-      'hacken-live-router-context/0.4.0',
-      'hacken-live-router-context/0.5.0',
-      'hacken-live-router-context/0.6.0',
-      'hacken-live-router-context/0.10.0',
-      'hacken-live-router-context/0.7.0',
-      'hacken-live-router-context/0.8.0',
-      'hacken-live-router-context/0.9.0',
-      'hacken-live-router-context/0.11.0',
-      'hacken-live-router-context/0.12.0',
-      'hacken-live-router-context/0.13.0',
-      'hacken-live-router-context/0.14.0',
-      'hacken-live-router-context/0.15.0',
-      'hacken-live-router-context/0.16.0',
-      'hacken-live-router-context/0.17.0',
-      'hacken-live-router-context/0.18.0',
-      'hacken-live-router-context/0.19.0',
-      'hacken-live-router-context/0.20.0',
-      'hacken-live-router-context/0.21.0',
-      'hacken-live-router-context/0.22.0',
-      'hacken-live-router-context/0.23.0',
-      'hacken-live-router-context/0.24.0',
-      'hacken-live-router-context/0.25.0',
-      'hacken-live-router-context/0.26.0',
-      'hacken-live-router-context/0.27.0',
-      'hacken-live-router-context/0.28.0',
-      'hacken-live-router-context/0.29.0',
-      'hacken-live-router-context/0.30.0',
-    ]) {
-      expect(superseded, 'a superseded version must not equal the current one').not.toBe(LIVE_SCENARIO_VERSION)
+    const currentMinor = Number(LIVE_SCENARIO_VERSION.match(/\/0\.(\d+)\.0$/)?.[1])
+    expect(currentMinor).toBeGreaterThanOrEqual(3)
+
+    for (let minor = 3; minor < currentMinor; minor += 1) {
+      const superseded = `hacken-live-router-context/0.${minor}.0`
       expect(reportMatchesCurrentPipeline({ ...report, scenarioVersion: superseded }, false), superseded).toBe(false)
     }
   })

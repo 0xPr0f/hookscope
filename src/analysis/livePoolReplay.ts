@@ -1,7 +1,21 @@
 import type { Address, Hex, PublicClient } from 'viem'
 import { runForkReplay, type ForkReplayResult } from './revmProof'
 import type { Evidence, PoolDescriptor, PoolReplayKind, PoolReplayReference } from '../domain/report'
-import { loadPoolReplayCandidate, replayReferencesForPool, type PoolReplayCandidate } from '../data/replay'
+import {
+  loadPoolReplayCandidate,
+  loadPoolReplayCandidateFromTransaction,
+  loadPoolReplayTransaction,
+  replayReferencesForPool,
+  type IndexedReplayTransaction,
+  type PoolReplayCandidate,
+} from '../data/replay'
+import {
+  collectUniswapV4Operations,
+  decodeUniswapV4Calldata,
+  type V4PathKey,
+  type V4PoolKey,
+} from '../adapters/uniswapV4RouterCodec'
+import { computePoolId } from '../adapters/uniswapV4Pool'
 import { decodeCurrencyDeltaTimelines } from './currencyDeltas'
 import { observeHookCharge } from './hookCharge'
 
@@ -30,7 +44,96 @@ export type LivePoolReplayCoverage = {
 }
 
 type CandidateLoader = typeof loadPoolReplayCandidate
+type TransactionLoader = typeof loadPoolReplayTransaction
+type PreparedCandidateLoader = typeof loadPoolReplayCandidateFromTransaction
 type ForkReplayer = typeof runForkReplay
+
+const REPLAY_REFERENCE_CEILING = 8
+
+function poolIdForKey(poolKey: V4PoolKey) {
+  return computePoolId({
+    currency0: poolKey.currency0,
+    currency1: poolKey.currency1,
+    fee: poolKey.fee,
+    tickSpacing: poolKey.tickSpacing,
+    hook: poolKey.hooks,
+  })
+}
+
+function pathReferencesPool(start: Address, path: V4PathKey[], poolId: Hex) {
+  let current = start
+  for (const segment of path) {
+    const next = segment.intermediateCurrency
+    const [currency0, currency1] = current.toLowerCase() < next.toLowerCase()
+      ? [current, next]
+      : [next, current]
+    const observed = computePoolId({
+      currency0,
+      currency1,
+      fee: segment.fee,
+      tickSpacing: segment.tickSpacing,
+      hook: segment.hooks,
+    })
+    if (observed.toLowerCase() === poolId.toLowerCase()) return true
+    current = next
+  }
+  return false
+}
+
+/**
+ * A cheap, browser-local preference only. Receipt matching and revm execution
+ * remain mandatory before the transaction becomes evidence.
+ */
+export function officialCalldataReferencesPool(calldata: Hex, poolId: Hex) {
+  const decoded = decodeUniswapV4Calldata(calldata)
+  if (!decoded) return false
+  return collectUniswapV4Operations(decoded).some((operation) => {
+    if ('poolKey' in operation) return poolIdForKey(operation.poolKey).toLowerCase() === poolId.toLowerCase()
+    if (operation.kind === 'swap-exact-in') return pathReferencesPool(operation.currencyIn, operation.path, poolId)
+    if (operation.kind === 'swap-exact-out') return pathReferencesPool(operation.currencyOut, operation.path, poolId)
+    // Token-ID-only PositionManager operations need the later pinned position
+    // lookup and therefore receive no speculative priority here.
+    return false
+  })
+}
+
+type PreparedReplayReference = {
+  reference: PoolReplayReference
+  index: number
+  transaction?: IndexedReplayTransaction
+  preferred: boolean
+  failure?: string
+}
+
+async function prepareReplayReferences(input: {
+  client: PublicClient
+  pool: PoolDescriptor
+  references: PoolReplayReference[]
+  signal: AbortSignal
+  loadTransaction: TransactionLoader
+}): Promise<PreparedReplayReference[]> {
+  const prepared = await Promise.all(input.references.map(async (reference, index): Promise<PreparedReplayReference> => {
+    if (input.signal.aborted) throw new DOMException('Live pool replay cancelled', 'AbortError')
+    try {
+      const transaction = await input.loadTransaction(input.client, reference)
+      return {
+        reference,
+        index,
+        transaction,
+        preferred: officialCalldataReferencesPool(transaction.input, input.pool.poolId),
+      }
+    } catch (error) {
+      if (input.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+      return {
+        reference,
+        index,
+        preferred: false,
+        failure: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }))
+  return prepared.sort((left, right) => Number(right.preferred) - Number(left.preferred) || left.index - right.index)
+}
 
 /** Converts provider- and engine-specific failures into a stable report reason. */
 export function replayFailureDiagnostic(reason: string) {
@@ -82,7 +185,7 @@ function replayEvidence(outcome: PoolReplayOutcome, poolManager: Address, pool: 
   return {
     id: `revm-pool-replay:${candidate.kind}:${candidate.transactionHash}`,
     detectorId: 'revm-pool-replay',
-    detectorVersion: '0.7.0',
+    detectorVersion: '0.8.0',
     severity: 'info',
     evidenceClass: 'concrete-observation',
     subject: candidate.transaction.to,
@@ -187,10 +290,17 @@ export async function runLivePoolReplays(input: {
   timeoutMs?: number
   maxHydrationRequests?: number
   loadCandidate?: CandidateLoader
+  loadTransaction?: TransactionLoader
+  loadPreparedCandidate?: PreparedCandidateLoader
   replay?: ForkReplayer
   onProgress?: (completed: number, total: number, detail: string) => void
 }): Promise<LivePoolReplayCoverage> {
   const loadCandidate = input.loadCandidate ?? loadPoolReplayCandidate
+  const loadTransaction = input.loadTransaction ?? loadPoolReplayTransaction
+  const loadPreparedCandidate = input.loadPreparedCandidate ?? loadPoolReplayCandidateFromTransaction
+  // Existing tests and embedders that replace candidate loading keep ownership
+  // of their ordering unless they also opt into the transaction prefetch hook.
+  const shouldPrefetch = input.loadCandidate === undefined || input.loadTransaction !== undefined
   const replay = input.replay ?? runForkReplay
   const outcomes: PoolReplayOutcome[] = []
   const tasks: { pool: PoolDescriptor; references: PoolReplayReference[]; index: number }[] = []
@@ -198,7 +308,7 @@ export async function runLivePoolReplays(input: {
   for (const pool of input.pools) {
     const references = replayReferencesForPool(pool)
       .filter((reference) => BigInt(reference.blockNumber) <= input.pinnedBlockNumber)
-      .slice(0, 3)
+      .slice(0, REPLAY_REFERENCE_CEILING)
     if (!references.length) {
       outcomes.push({ poolId: pool.poolId, hook: pool.hook, status: 'unavailable', reason: 'No pinned historical transaction reference is available.' })
       continue
@@ -220,13 +330,36 @@ export async function runLivePoolReplays(input: {
       if (!task) continue
       const failures: string[] = []
       let selected: PoolReplayOutcome | undefined
-      for (const [referenceIndex, reference] of task.references.entries()) {
+      const prepared: PreparedReplayReference[] = shouldPrefetch
+        ? await prepareReplayReferences({
+            client: input.client,
+            pool: task.pool,
+            references: task.references,
+            signal: input.signal,
+            loadTransaction,
+          })
+        : task.references.map((reference, index) => ({ reference, index, preferred: false }))
+      for (const [attemptIndex, item] of prepared.entries()) {
         if (input.signal.aborted) throw new DOMException('Live pool replay cancelled', 'AbortError')
+        const { reference } = item
+        if (item.failure) {
+          failures.push(`${reference.kind}: ${item.failure}`)
+          continue
+        }
         attempted++
         try {
-          const candidate = await loadCandidate(input.client, input.chainId, input.poolManager, task.pool, reference)
+          const candidate = item.transaction && input.loadCandidate === undefined
+            ? await loadPreparedCandidate(
+                input.client,
+                input.chainId,
+                input.poolManager,
+                task.pool,
+                reference,
+                item.transaction,
+              )
+            : await loadCandidate(input.client, input.chainId, input.poolManager, task.pool, reference)
           const result = await replay({
-            scanId: `${input.scanId}-pool-replay-${task.index}-${referenceIndex}`,
+            scanId: `${input.scanId}-pool-replay-${task.index}-${attemptIndex}`,
             client: input.client,
             stateBlockNumber: candidate.stateBlockNumber,
             transaction: candidate.transaction,

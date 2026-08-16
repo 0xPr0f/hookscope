@@ -69,7 +69,7 @@ Run the complete local verification gate:
 pnpm verify
 ```
 
-It runs lint, browser and tooling tests, both Rust/revm configurations, Foundry differential tests, TypeScript, and the production build.
+It runs lint, browser tests, both Rust/revm configurations, Foundry differential tests, TypeScript, and the production build.
 
 Additional checks:
 

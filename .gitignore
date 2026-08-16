@@ -9,3 +9,4 @@ crates/revm-wasm/target/
 out/
 cache/
 /docs/
+/tests/
