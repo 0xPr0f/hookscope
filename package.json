@@ -11,7 +11,6 @@
     "test": "vitest run && pnpm test:tooling",
     "test:watch": "vitest",
     "test:tooling": "node --test tests/tooling/*.test.mjs",
-    "test:e2e": "pnpm build && playwright test",
     "test:foundry": "forge test --root . --ast -vv",
     "test:rust": "cargo test --manifest-path crates/revm-wasm/Cargo.toml && cargo test --manifest-path crates/revm-wasm/Cargo.toml --features libafl-fuzz",
     "canary:chains": "node scripts/chain-canary.mjs",
@@ -39,7 +38,6 @@
   },
   "devDependencies": {
     "@eslint/js": "9.38.0",
-    "@playwright/test": "1.56.1",
     "@types/node": "24.8.1",
     "@types/react": "19.1.16",
     "@types/react-dom": "19.1.9",

@@ -6,8 +6,6 @@ crates/revm-wasm/target/
 .env.*
 !.env.example
 .vercel/
-playwright-report/
-test-results/
 out/
 cache/
 /docs/

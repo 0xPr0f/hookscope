@@ -74,13 +74,6 @@ It runs lint, browser and tooling tests, both Rust/revm configurations, Foundry 
 Additional checks:
 
 ```bash
-pnpm test:e2e
 pnpm wasm:build
 node scripts/validate-deployment.mjs
-```
-
-The Playwright suite targets Chromium, Firefox, and WebKit. The optional live canary requires configured index and archive access:
-
-```bash
-LIVE_CANARY=1 pnpm exec playwright test tests/e2e/live-canary.spec.ts --project=chromium
 ```

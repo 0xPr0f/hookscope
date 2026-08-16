@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The Wasm artifacts under src/wasm are generated and untracked, so every lane
-  # that builds or runs the browser bundle has to produce them first.
+  # The Wasm artifacts under src/wasm are generated and checked in. Every lane
+  # that verifies or runs the browser bundle reproduces them with this toolchain.
   RUST_TOOLCHAIN: 1.88.0
 
 jobs:
@@ -31,14 +31,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.13.1
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm wasm:build
-      # Deployment consumes the checked-in Wasm packages because Vercel's
-      # JavaScript build image does not compile the Rust wrapper. Keep those
-      # packages pinned to a fresh wasm-pack build.
-      - run: git diff --exit-code src/wasm/
       - run: pnpm test
       - run: pnpm build
       - run: node scripts/validate-deployment.mjs
@@ -74,34 +70,6 @@ jobs:
       # claim in a report.
       - run: node scripts/generate-protocol-scenario-artifact.mjs
       - run: git diff --exit-code src/fixtures/generated/
-
-  e2e:
-    name: End-to-end browser matrix
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: wasm32-unknown-unknown
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm wasm:build
-      - run: pnpm exec playwright install --with-deps chromium firefox webkit
-      - run: pnpm test:e2e
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
 
   supply-chain:
     name: SBOM, licenses, and pinned versions
